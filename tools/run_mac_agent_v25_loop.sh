@@ -36,9 +36,30 @@ export QG_CENT_ACCOUNT_ACCELERATION="${QG_CENT_ACCOUNT_ACCELERATION:-1}"
 export QG_TELEGRAM_COMMANDS_ALLOWED="${QG_TELEGRAM_COMMANDS_ALLOWED:-0}"
 
 PYTHON_BIN="${QG_PYTHON_BIN:-python3}"
-RUNTIME_DIR="${QG_RUNTIME_DIR:-$REPO_ROOT/runtime}"
 INTERVAL_SECONDS="${QG_AGENT_V25_INTERVAL_SECONDS:-300}"
 SEND_TELEGRAM="${QG_AGENT_V25_SEND_TELEGRAM:-0}"
+
+default_mt5_files_dir() {
+  printf '%s\n' "$HOME/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Files"
+}
+
+resolve_runtime_dir() {
+  local mt5_files
+  mt5_files="$(default_mt5_files_dir)"
+  if [[ -n "${QG_RUNTIME_DIR:-}" ]]; then
+    printf '%s\n' "$QG_RUNTIME_DIR"
+  elif [[ -n "${QG_MT5_FILES_DIR:-}" ]]; then
+    printf '%s\n' "$QG_MT5_FILES_DIR"
+  elif [[ -d "$mt5_files" ]]; then
+    printf '%s\n' "$mt5_files"
+  else
+    printf '%s\n' "$REPO_ROOT/runtime"
+  fi
+}
+
+RUNTIME_DIR="$(resolve_runtime_dir)"
+export QG_RUNTIME_DIR="${QG_RUNTIME_DIR:-$RUNTIME_DIR}"
+export QG_MT5_FILES_DIR="${QG_MT5_FILES_DIR:-$RUNTIME_DIR}"
 
 MODE="--loop"
 if [[ "${1:-}" == "--once" ]]; then

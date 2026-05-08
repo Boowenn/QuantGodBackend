@@ -1,9 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
+
+
+MT5_FILES_ENV_KEYS = (
+    "QG_MT5_FILES_DIR",
+    "QG_MT5_FILES",
+    "QG_HFM_FILES_DIR",
+    "QG_HFM_FILES",
+)
+
+DEFAULT_MT5_FILES_PATH = (
+    Path.home()
+    / "Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Files"
+)
 
 
 def utc_now_iso() -> str:
@@ -23,6 +37,49 @@ def load_json(path: Path) -> Dict[str, Any]:
 def write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def resolve_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return Path.cwd() / path
+
+
+def unique_existing_dirs(candidates: Iterable[Path]) -> List[Path]:
+    seen = set()
+    dirs: List[Path] = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        key = str(resolved)
+        if key in seen or not resolved.exists() or not resolved.is_dir():
+            continue
+        seen.add(key)
+        dirs.append(resolved)
+    return dirs
+
+
+def candidate_mt5_files_dirs(runtime_dir: Path) -> List[Path]:
+    """Return runtime plus configured live MT5/HFM MQL5/Files directories.
+
+    Evidence OS can be run from a repository runtime directory while the real EA
+    writes into the broker terminal's MQL5/Files folder. Keep the discovery logic
+    shared so parity, execution feedback, and future evidence readers agree on the
+    same real source of truth.
+    """
+    candidates: List[Path] = [Path(runtime_dir)]
+    explicit_candidates: List[Path] = []
+    for key in MT5_FILES_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            explicit_candidates.append(resolve_path(value))
+    candidates.extend(explicit_candidates)
+    if not explicit_candidates and os.environ.get("QG_ENABLE_DEFAULT_MT5_FEEDBACK_DISCOVERY") == "1":
+        candidates.append(DEFAULT_MT5_FILES_PATH)
+    return unique_existing_dirs(candidates)
 
 
 def append_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:

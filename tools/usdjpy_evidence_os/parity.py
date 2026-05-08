@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
-from .io_utils import load_json, utc_now_iso, write_json
+from .io_utils import candidate_mt5_files_dirs, load_json, utc_now_iso, write_json
 from .schema import AGENT_VERSION, FOCUS_SYMBOL, SAFETY_BOUNDARY, parity_path
 
 try:
@@ -24,13 +24,16 @@ PROMOTION_HARD_CHECKS = {
     "live_loop_no_frontend_execution",
 }
 
+RSI_DIAGNOSTICS_FILE = "QuantGod_USDJPYRsiEntryDiagnostics.json"
+MT5_DASHBOARD_FILE = "QuantGod_Dashboard.json"
+
 
 def build_parity_report(runtime_dir: Path, write: bool = True) -> Dict[str, Any]:
     sync = _sync_strategy_json_python_evidence(runtime_dir)
     backtest = load_json(runtime_dir / "backtest" / "QuantGod_StrategyBacktestReport.json")
     replay = load_json(runtime_dir / "replay" / "usdjpy" / "QuantGod_USDJPYBarReplayReport.json")
     live_loop = load_json(runtime_dir / "live" / "QuantGod_USDJPYLiveLoopStatus.json")
-    diagnostics = load_json(runtime_dir / "QuantGod_USDJPYRsiEntryDiagnostics.json")
+    diagnostics, diagnostics_source = _load_rsi_diagnostics(runtime_dir)
 
     deep_gate_check = _check_deep_gate_matrix(backtest, replay, diagnostics)
     checks: List[Dict[str, Any]] = [
@@ -66,6 +69,7 @@ def build_parity_report(runtime_dir: Path, write: bool = True) -> Dict[str, Any]
         "summary": _summary(checks),
         "reasonZh": _reason_zh(status),
         "evidenceSync": sync,
+        "rsiDiagnosticsSource": diagnostics_source,
         "singleSourceOfTruth": "STRATEGY_JSON_PYTHON_REPLAY_MQL5_EA_PARITY",
         "safety": dict(SAFETY_BOUNDARY),
     }
@@ -84,13 +88,14 @@ def _sync_strategy_json_python_evidence(runtime_dir: Path) -> Dict[str, Any]:
     generic GA seed defaults.
     """
     runtime_dir = Path(runtime_dir)
-    diagnostics = load_json(runtime_dir / "QuantGod_USDJPYRsiEntryDiagnostics.json")
+    diagnostics, diagnostics_source = _load_rsi_diagnostics(runtime_dir)
     sync: Dict[str, Any] = {
         "schema": "quantgod.strategy_python_parity_sync.v1",
         "createdAt": utc_now_iso(),
         "strategyJsonBacktest": "SKIPPED",
         "pythonReplay": "SKIPPED",
         "source": "MQL5_EA_DIAGNOSTICS" if diagnostics else "DEFAULT_STRATEGY_JSON",
+        "rsiDiagnosticsSource": diagnostics_source,
         "safety": dict(SAFETY_BOUNDARY),
     }
 
@@ -112,6 +117,98 @@ def _sync_strategy_json_python_evidence(runtime_dir: Path) -> Dict[str, Any]:
         sync["pythonReplay"] = "FAILED"
         sync["pythonReplayError"] = str(exc)
     return sync
+
+
+def _load_rsi_diagnostics(runtime_dir: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    runtime_dir = Path(runtime_dir)
+    runtime_file = runtime_dir / RSI_DIAGNOSTICS_FILE
+    candidates = _prefer_live_dirs(candidate_mt5_files_dirs(runtime_dir), runtime_dir)
+    live_candidates = [path for path in candidates if not _same_path(path, runtime_dir)]
+    runtime_candidates = [path for path in candidates if _same_path(path, runtime_dir)]
+
+    for directory in live_candidates:
+        path = directory / RSI_DIAGNOSTICS_FILE
+        diagnostics = load_json(path)
+        if diagnostics:
+            source = _diagnostics_source("standalone_file", path, runtime_file)
+            _sync_runtime_diagnostics(runtime_file, diagnostics, source)
+            return diagnostics, source
+
+    for directory in live_candidates:
+        path = directory / MT5_DASHBOARD_FILE
+        dashboard = load_json(path)
+        embedded = dashboard.get("usdJpyRsiEntryDiagnostics")
+        if isinstance(embedded, dict) and embedded:
+            source = _diagnostics_source("dashboard_embedded", path, runtime_file)
+            _sync_runtime_diagnostics(runtime_file, embedded, source)
+            return embedded, source
+
+    for directory in runtime_candidates:
+        path = directory / RSI_DIAGNOSTICS_FILE
+        diagnostics = load_json(path)
+        if diagnostics:
+            source = _diagnostics_source("standalone_file", path, runtime_file)
+            _sync_runtime_diagnostics(runtime_file, diagnostics, source)
+            return diagnostics, source
+
+    for directory in runtime_candidates:
+        path = directory / MT5_DASHBOARD_FILE
+        dashboard = load_json(path)
+        embedded = dashboard.get("usdJpyRsiEntryDiagnostics")
+        if isinstance(embedded, dict) and embedded:
+            source = _diagnostics_source("dashboard_embedded", path, runtime_file)
+            _sync_runtime_diagnostics(runtime_file, embedded, source)
+            return embedded, source
+
+    return {}, {
+        "type": "missing",
+        "searchedDirs": [str(path) for path in candidates],
+        "expectedFile": RSI_DIAGNOSTICS_FILE,
+    }
+
+
+def _prefer_live_dirs(candidates: List[Path], runtime_dir: Path) -> List[Path]:
+    try:
+        runtime_resolved = runtime_dir.resolve()
+    except Exception:
+        runtime_resolved = runtime_dir
+    return sorted(
+        candidates,
+        key=lambda path: 1 if _same_path(path, runtime_resolved) else 0,
+    )
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except Exception:
+        return left == right
+
+
+def _diagnostics_source(source_type: str, path: Path, runtime_file: Path) -> Dict[str, Any]:
+    try:
+        resolved_path = path.resolve()
+    except Exception:
+        resolved_path = path
+    try:
+        resolved_runtime = runtime_file.resolve()
+    except Exception:
+        resolved_runtime = runtime_file
+    return {
+        "type": source_type,
+        "path": str(resolved_path),
+        "runtimePath": str(resolved_runtime),
+        "runtimeSynced": str(resolved_path) != str(resolved_runtime),
+    }
+
+
+def _sync_runtime_diagnostics(runtime_file: Path, diagnostics: Dict[str, Any], source: Dict[str, Any]) -> None:
+    if not source.get("runtimeSynced"):
+        return
+    try:
+        write_json(runtime_file, diagnostics)
+    except Exception:
+        source["runtimeSyncError"] = True
 
 
 def _strategy_seed_from_ea_diagnostics(diagnostics: Dict[str, Any]) -> Dict[str, Any]:

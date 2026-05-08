@@ -43,6 +43,180 @@ class USDJPYEvidenceOSTests(unittest.TestCase):
             else:
                 os.environ["QG_MT5_FILES_DIR"] = old_mt5_files_dir
 
+    def test_parity_reads_live_mt5_rsi_diagnostics_when_runtime_is_repo_local(self):
+        old_mt5_files_dir = os.environ.get("QG_MT5_FILES_DIR")
+        try:
+            with tempfile.TemporaryDirectory() as runtime_tmp, tempfile.TemporaryDirectory() as mt5_tmp:
+                runtime_dir = Path(runtime_tmp)
+                mt5_files = Path(mt5_tmp)
+                os.environ["QG_MT5_FILES_DIR"] = str(mt5_files)
+                live_dir = runtime_dir / "live"
+                live_dir.mkdir(parents=True)
+                (live_dir / "QuantGod_USDJPYLiveLoopStatus.json").write_text(
+                    """
+                    {
+                      "topLiveEligiblePolicy": {
+                        "strategy": "RSI_Reversal",
+                        "direction": "LONG",
+                        "entryMode": "OPPORTUNITY_ENTRY"
+                      },
+                      "safety": {
+                        "orderSendAllowed": false,
+                        "livePresetMutationAllowed": false
+                      }
+                    }
+                    """,
+                    encoding="utf-8",
+                )
+                (mt5_files / "QuantGod_USDJPYRsiEntryDiagnostics.json").write_text(
+                    """
+                    {
+                      "schema": "quantgod.mt5.usdjpy_rsi_entry_diagnostics.v1",
+                      "symbol": "USDJPYc",
+                      "strategy": "RSI_Reversal",
+                      "direction": "LONG",
+                      "state": "READY_BUY_SIGNAL",
+                      "inputs": {
+                        "PilotRsiTimeframe": "H1",
+                        "PilotRsiPeriod": 2,
+                        "PilotRsiOversold": 15,
+                        "PilotRsiOverbought": 85,
+                        "PilotRsiCrossbackThreshold": 0
+                      },
+                      "route": {
+                        "timeframe": "H1",
+                        "candidateEnabled": true,
+                        "liveEnabled": true,
+                        "inScope": true
+                      },
+                      "permissions": {
+                        "liveMode": true,
+                        "tradeAllowed": true,
+                        "readOnlyMode": false
+                      },
+                      "guards": {
+                        "sessionOpen": true,
+                        "spreadAllowed": true,
+                        "newsBlocked": false,
+                        "cooldownActive": false,
+                        "startupGuardActive": false,
+                        "symbolPositions": 0,
+                        "maxPositionsPerSymbol": 2
+                      },
+                      "rsi": {
+                        "period": 2,
+                        "oversold": 15,
+                        "buyBandLevel": 15,
+                        "crossbackThreshold": 0,
+                        "signalReady": true,
+                        "signalDirection": "BUY",
+                        "evalCode": "SIGNAL_BUY"
+                      }
+                    }
+                    """,
+                    encoding="utf-8",
+                )
+
+                parity = build_parity_report(runtime_dir, write=True)
+                self.assertEqual(parity["status"], "PARITY_PASS", parity)
+                self.assertEqual(parity["promotionGate"]["status"], "PASS")
+                self.assertEqual(parity["rsiDiagnosticsSource"]["type"], "standalone_file")
+                self.assertIn(str(mt5_files), parity["rsiDiagnosticsSource"]["path"])
+                self.assertTrue((runtime_dir / "QuantGod_USDJPYRsiEntryDiagnostics.json").exists())
+                self.assertEqual(parity["deepParity"]["strategyJson"]["rsi"]["period"], 2.0)
+        finally:
+            if old_mt5_files_dir is None:
+                os.environ.pop("QG_MT5_FILES_DIR", None)
+            else:
+                os.environ["QG_MT5_FILES_DIR"] = old_mt5_files_dir
+
+    def test_parity_reads_embedded_dashboard_rsi_diagnostics_from_live_mt5_files_dir(self):
+        old_mt5_files_dir = os.environ.get("QG_MT5_FILES_DIR")
+        try:
+            with tempfile.TemporaryDirectory() as runtime_tmp, tempfile.TemporaryDirectory() as mt5_tmp:
+                runtime_dir = Path(runtime_tmp)
+                mt5_files = Path(mt5_tmp)
+                os.environ["QG_MT5_FILES_DIR"] = str(mt5_files)
+                live_dir = runtime_dir / "live"
+                live_dir.mkdir(parents=True)
+                (live_dir / "QuantGod_USDJPYLiveLoopStatus.json").write_text(
+                    """
+                    {
+                      "topLiveEligiblePolicy": {
+                        "strategy": "RSI_Reversal",
+                        "direction": "LONG",
+                        "entryMode": "OPPORTUNITY_ENTRY"
+                      },
+                      "safety": {
+                        "orderSendAllowed": false,
+                        "livePresetMutationAllowed": false
+                      }
+                    }
+                    """,
+                    encoding="utf-8",
+                )
+                (mt5_files / "QuantGod_Dashboard.json").write_text(
+                    """
+                    {
+                      "usdJpyRsiEntryDiagnostics": {
+                        "schema": "quantgod.mt5.usdjpy_rsi_entry_diagnostics.v1",
+                        "symbol": "USDJPYc",
+                        "strategy": "RSI_Reversal",
+                        "direction": "LONG",
+                        "state": "READY_BUY_SIGNAL",
+                        "inputs": {
+                          "PilotRsiTimeframe": "H1",
+                          "PilotRsiPeriod": 2,
+                          "PilotRsiOversold": 15,
+                          "PilotRsiOverbought": 85,
+                          "PilotRsiCrossbackThreshold": 0
+                        },
+                        "route": {
+                          "timeframe": "H1",
+                          "candidateEnabled": true,
+                          "liveEnabled": true,
+                          "inScope": true
+                        },
+                        "permissions": {
+                          "liveMode": true,
+                          "tradeAllowed": true,
+                          "readOnlyMode": false
+                        },
+                        "guards": {
+                          "sessionOpen": true,
+                          "spreadAllowed": true,
+                          "newsBlocked": false,
+                          "cooldownActive": false,
+                          "startupGuardActive": false,
+                          "symbolPositions": 0,
+                          "maxPositionsPerSymbol": 2
+                        },
+                        "rsi": {
+                          "period": 2,
+                          "oversold": 15,
+                          "buyBandLevel": 15,
+                          "crossbackThreshold": 0,
+                          "signalReady": true,
+                          "signalDirection": "BUY",
+                          "evalCode": "SIGNAL_BUY"
+                        }
+                      }
+                    }
+                    """,
+                    encoding="utf-8",
+                )
+
+                parity = build_parity_report(runtime_dir, write=True)
+                self.assertEqual(parity["status"], "PARITY_PASS", parity)
+                self.assertEqual(parity["promotionGate"]["status"], "PASS")
+                self.assertEqual(parity["rsiDiagnosticsSource"]["type"], "dashboard_embedded")
+                self.assertTrue((runtime_dir / "QuantGod_USDJPYRsiEntryDiagnostics.json").exists())
+        finally:
+            if old_mt5_files_dir is None:
+                os.environ.pop("QG_MT5_FILES_DIR", None)
+            else:
+                os.environ["QG_MT5_FILES_DIR"] = old_mt5_files_dir
+
     def test_ingest_snapshot_backtest_and_evidence_os_write_audit_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime_dir = Path(tmp)
