@@ -35,6 +35,7 @@ def evidence_metrics(runtime_dir: Path, seed: Dict[str, Any] | None = None) -> D
     replay = _load_json(runtime_dir / "replay" / "usdjpy" / "QuantGod_USDJPYBarReplayReport.json")
     walk_forward = _load_json(runtime_dir / "replay" / "usdjpy" / "QuantGod_USDJPYWalkForwardReport.json")
     strategy_backtest = _strategy_backtest_metrics(runtime_dir, seed)
+    backtest_required = seed is not None
     parity = _load_json(runtime_dir / "evidence_os" / "QuantGod_StrategyParityReport.json")
     execution = _load_json(runtime_dir / "evidence_os" / "QuantGod_LiveExecutionQualityReport.json")
     cases = _load_json(runtime_dir / "evidence_os" / "QuantGod_CaseMemorySummary.json")
@@ -46,8 +47,14 @@ def evidence_metrics(runtime_dir: Path, seed: Dict[str, Any] | None = None) -> D
     execution_metrics = execution.get("metrics") if isinstance(execution.get("metrics"), dict) else {}
     execution_gate = execution.get("promotionGate") if isinstance(execution.get("promotionGate"), dict) else {}
     has_seed_backtest = bool(seed and strategy_backtest)
+    backtest_ok = bool(strategy_backtest.get("ok")) if strategy_backtest else False
     backtest_net_r = _num(backtest_metrics.get("netR"), 0)
     backtest_trade_count = int(_num(backtest_metrics.get("tradeCount"), 0))
+    backtest_profit_factor = _num(backtest_metrics.get("profitFactor"), 0)
+    backtest_win_rate = _num(backtest_metrics.get("winRate"), 0)
+    backtest_max_drawdown = _num(backtest_metrics.get("maxDrawdownR"), 0)
+    backtest_sharpe = _num(backtest_metrics.get("sharpe"), 0)
+    backtest_sortino = _num(backtest_metrics.get("sortino"), 0)
     replay_net_r = _num(entry_relaxed.get("netRDelta") or summary.get("relaxedNetRDelta") or wf_summary.get("netRDelta"), 0)
     backtest_penalty = min(1.0, _num(backtest_metrics.get("maxDrawdownR"), 0) * 0.2)
     promotion_gate = parity.get("promotionGate") if isinstance(parity.get("promotionGate"), dict) else {}
@@ -77,7 +84,9 @@ def evidence_metrics(runtime_dir: Path, seed: Dict[str, Any] | None = None) -> D
         "validationNetRDelta": _num(wf_summary.get("validationNetRDelta"), 0),
         "forwardNetRDelta": _num(wf_summary.get("forwardNetRDelta"), 0),
         "strategyBacktest": {
+            "required": backtest_required,
             "present": bool(strategy_backtest),
+            "ok": backtest_ok,
             "runId": strategy_backtest.get("runId"),
             "strategyId": strategy_backtest.get("strategyId"),
             "seedId": strategy_backtest.get("seedId"),
@@ -85,11 +94,14 @@ def evidence_metrics(runtime_dir: Path, seed: Dict[str, Any] | None = None) -> D
             "direction": strategy_backtest.get("direction"),
             "engine": strategy_backtest.get("engine") if isinstance(strategy_backtest.get("engine"), dict) else {},
             "netR": _num(backtest_metrics.get("netR"), 0),
-            "profitFactor": _num(backtest_metrics.get("profitFactor"), 0),
-            "winRate": _num(backtest_metrics.get("winRate"), 0),
-            "maxDrawdownR": _num(backtest_metrics.get("maxDrawdownR"), 0),
-            "sharpe": _num(backtest_metrics.get("sharpe"), 0),
+            "profitFactor": backtest_profit_factor,
+            "winRate": backtest_win_rate,
+            "maxDrawdownR": backtest_max_drawdown,
+            "sharpe": backtest_sharpe,
+            "sortino": backtest_sortino,
             "tradeCount": int(_num(backtest_metrics.get("tradeCount"), 0)),
+            "evidenceQuality": strategy_backtest.get("evidenceQuality") or "LOW",
+            "reasonZh": strategy_backtest.get("reasonZh") or "",
         },
         "parity": {
             "present": bool(parity),
@@ -133,20 +145,31 @@ def evidence_metrics(runtime_dir: Path, seed: Dict[str, Any] | None = None) -> D
 
 def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
     metrics = evidence_metrics(runtime_dir, seed)
+    backtest = metrics.get("strategyBacktest", {})
     family = seed.get("strategyFamily", "")
     direction = seed.get("direction", "")
     sample_count = metrics["sampleCount"]
     family_bonus = 0.25 if family == "RSI_Reversal" and direction == "LONG" else -0.15
     low_sample_penalty = max(0.0, (20 - sample_count) / 20.0)
     max_adverse_penalty = max(0.0, abs(min(0.0, metrics["maxAdverseR"])) - 0.5)
+    max_drawdown_penalty = min(1.5, _num(backtest.get("maxDrawdownR"), 0) * 0.35)
     overfit_penalty = 0.25 if metrics["validationNetRDelta"] < 0 or metrics["forwardNetRDelta"] < 0 else 0.0
     trade_frequency_penalty = 0.15 if sample_count == 0 else 0.0
     evidence_penalty = float(metrics.get("evidencePenalty", 0.0))
+    profit_factor_bonus = _profit_factor_bonus(_num(backtest.get("profitFactor"), 0))
+    win_rate_bonus = _win_rate_bonus(_num(backtest.get("winRate"), 0))
+    sharpe_bonus = _bounded_bonus(_num(backtest.get("sharpe"), 0), scale=0.12, cap=0.45)
+    sortino_bonus = _bounded_bonus(_num(backtest.get("sortino"), 0), scale=0.08, cap=0.35)
     fitness = (
         metrics["netR"]
         + metrics["profitCaptureRatio"] * 0.5
         + metrics["missedOpportunityReduction"] * 0.2
+        + profit_factor_bonus
+        + win_rate_bonus
+        + sharpe_bonus
+        + sortino_bonus
         + family_bonus
+        - max_drawdown_penalty
         - max_adverse_penalty
         - overfit_penalty
         - low_sample_penalty
@@ -154,7 +177,11 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         - evidence_penalty
     )
     blocker = None
-    if sample_count < 5:
+    if not backtest.get("present"):
+        blocker = "STRATEGY_BACKTEST_MISSING"
+    elif not backtest.get("ok"):
+        blocker = "STRATEGY_BACKTEST_FAILED"
+    elif sample_count < 5:
         blocker = "INSUFFICIENT_SAMPLES"
     elif overfit_penalty:
         blocker = "OVERFIT_RISK"
@@ -174,8 +201,13 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         "overfitPenalty": round(overfit_penalty, 4),
         "lowSamplePenalty": round(low_sample_penalty, 4),
         "maxAdversePenalty": round(max_adverse_penalty, 4),
+        "maxDrawdownPenalty": round(max_drawdown_penalty, 4),
         "tradeFrequencyPenalty": round(trade_frequency_penalty, 4),
         "evidencePenalty": round(evidence_penalty, 4),
+        "profitFactorBonus": round(profit_factor_bonus, 4),
+        "winRateBonus": round(win_rate_bonus, 4),
+        "sharpeBonus": round(sharpe_bonus, 4),
+        "sortinoBonus": round(sortino_bonus, 4),
         "blockerCode": blocker,
         "strategyBacktest": metrics.get("strategyBacktest", {}),
         "parity": metrics.get("parity", {}),
@@ -240,6 +272,22 @@ def _case_penalty(cases: Dict[str, Any]) -> float:
     severe_count = sum(int(_num(type_counts.get(name), 0)) for name in execution_types)
     overfit_count = int(_num(type_counts.get("GA_OVERFIT"), 0))
     return round(min(0.5, severe_count * 0.08 + overfit_count * 0.05), 4)
+
+
+def _profit_factor_bonus(value: float) -> float:
+    if value <= 1.0:
+        return -min(0.5, (1.0 - value) * 0.35)
+    return min(0.75, (value - 1.0) * 0.45)
+
+
+def _win_rate_bonus(value: float) -> float:
+    if value <= 0:
+        return 0.0
+    return max(-0.35, min(0.35, (value - 50.0) / 100.0 * 0.7))
+
+
+def _bounded_bonus(value: float, scale: float, cap: float) -> float:
+    return max(-cap, min(cap, value * scale))
 
 
 def _strategy_backtest_metrics(runtime_dir: Path, seed: Dict[str, Any] | None) -> Dict[str, Any]:

@@ -192,6 +192,31 @@ def _generation_cache_stats(runtime_dir: Path, candidates: List[Dict[str, Any]],
     return stats
 
 
+def _backtest_stats(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    rows = [
+        row.get("fitnessBreakdown", {}).get("strategyBacktest")
+        for row in candidates
+        if isinstance(row.get("fitnessBreakdown"), dict)
+    ]
+    backtests = [row for row in rows if isinstance(row, dict)]
+    scored = [row for row in backtests if row.get("present")]
+    passed = [row for row in scored if row.get("ok")]
+    trade_counts = [int(row.get("tradeCount") or 0) for row in scored]
+    net_values = [float(row.get("netR") or 0.0) for row in scored]
+    max_drawdowns = [float(row.get("maxDrawdownR") or 0.0) for row in scored]
+    return {
+        "required": True,
+        "candidateCount": len(candidates),
+        "scoredCount": len(scored),
+        "passedCount": len(passed),
+        "failedCount": max(0, len(candidates) - len(passed)),
+        "avgTradeCount": round(sum(trade_counts) / max(1, len(trade_counts)), 2),
+        "avgNetR": round(sum(net_values) / max(1, len(net_values)), 4),
+        "maxDrawdownR": round(max(max_drawdowns, default=0.0), 4),
+        "reasonZh": "每个 GA 候选必须先跑 USDJPY SQLite Strategy JSON 回测，结果进入 fitness。",
+    }
+
+
 def run_generation(runtime_dir: Path, write: bool = True, force: bool = False) -> Dict[str, Any]:
     limiter = check_run_allowed(runtime_dir, force=force)
     if not limiter.get("allowed"):
@@ -205,6 +230,7 @@ def run_generation(runtime_dir: Path, write: bool = True, force: bool = False) -
     seeds = build_population(generation_number, _existing_elites(runtime_dir), runtime_dir=runtime_dir)
     candidates = _score_candidates(runtime_dir, generation_number, generation_id, seeds)
     signature = evidence_signature(runtime_dir)
+    backtest_stats = _backtest_stats(candidates)
     elites = [row for row in candidates if row.get("status") == "ELITE_SELECTED"][: elite_count()]
     blocker_counts = Counter(str(row.get("blockerCode") or "PASSED") for row in candidates)
     best = candidates[0] if candidates else {}
@@ -228,6 +254,7 @@ def run_generation(runtime_dir: Path, write: bool = True, force: bool = False) -
         "mutationCount": sum(1 for row in candidates if row.get("source") == "MUTATION"),
         "crossoverCount": sum(1 for row in candidates if row.get("source") == "CROSSOVER"),
         "caseMemorySeedCount": sum(1 for row in candidates if row.get("source") == "CASE_MEMORY"),
+        "strategyBacktest": backtest_stats,
         "cache": _generation_cache_stats(runtime_dir, candidates, signature),
         "runLimiter": limiter,
         "safety": dict(SAFETY_BOUNDARY),
@@ -268,6 +295,7 @@ def run_generation(runtime_dir: Path, write: bool = True, force: bool = False) -
         "eliteCount": len(elites),
         "nextAction": f"基于 {len(elites)} 个 elite 生成第 {generation_number + 1} 代候选",
         "singleSourceOfTruth": "USDJPY_STRATEGY_JSON_GA_TRACE",
+        "strategyBacktestRequired": True,
         "safety": dict(SAFETY_BOUNDARY),
     }
     lineage = build_lineage(candidates)

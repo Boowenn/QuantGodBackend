@@ -54,12 +54,33 @@ class StrategyJsonGATests(unittest.TestCase):
                 self.assertTrue((ga_dir / name).exists(), name)
 
             self.assertTrue(result["candidates"])
+            self.assertTrue(result["generation"]["strategyBacktest"]["required"])
+            self.assertEqual(
+                result["generation"]["strategyBacktest"]["scoredCount"],
+                len(result["candidates"]),
+            )
             for row in result["candidates"]:
                 self.assertEqual(row["strategyJson"]["symbol"], "USDJPYc")
                 self.assertIn("generationId", row)
                 self.assertIn("seedId", row)
                 self.assertIn("fitness", row)
                 self.assertIn("blockerCode", row)
+                backtest = row["fitnessBreakdown"]["strategyBacktest"]
+                for field in [
+                    "required",
+                    "present",
+                    "ok",
+                    "netR",
+                    "profitFactor",
+                    "winRate",
+                    "maxDrawdownR",
+                    "sharpe",
+                    "sortino",
+                    "tradeCount",
+                ]:
+                    self.assertIn(field, backtest)
+                self.assertTrue(backtest["required"])
+                self.assertTrue(backtest["present"])
                 self.assertNotIn(row["promotionStage"], {"MICRO_LIVE", "LIVE_LIMITED"})
                 self.assertFalse(row["safety"]["orderSendAllowed"])
                 self.assertFalse(row["safety"]["livePresetMutationAllowed"])

@@ -3,6 +3,8 @@ from __future__ import annotations
 BLOCKER_ZH = {
     "SCHEMA_INVALID": "Strategy JSON schema 不合法",
     "SAFETY_REJECTED": "安全边界拒绝：含代码、密钥或交易执行原语",
+    "STRATEGY_BACKTEST_MISSING": "缺少 USDJPY SQLite Strategy JSON 回测证据",
+    "STRATEGY_BACKTEST_FAILED": "USDJPY SQLite Strategy JSON 回测失败",
     "INSUFFICIENT_SAMPLES": "样本不足，不能证明策略稳定",
     "REPLAY_FAILED": "回放评分失败",
     "WALK_FORWARD_FAILED": "Walk-forward forward/validation 段不稳定",
