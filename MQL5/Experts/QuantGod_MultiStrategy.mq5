@@ -141,6 +141,10 @@ input int    PilotConsecutiveLossPauseMinutes = 180;
 input bool   PilotCloseOnKillSwitch     = true;
 input long   PilotMagic                 = 520001;
 input int    PilotDeviationPoints       = 30;
+input bool   EnableUsdJpyKlineExporter  = true;
+input int    UsdJpyKlineExportIntervalMinutes = 60;
+input int    UsdJpyKlineExportMonths    = 12;
+input int    UsdJpyKlineExportMaxBarsPerTimeframe = 700000;
 
 string g_symbols[];
 string g_focusSymbol = "";
@@ -393,6 +397,7 @@ NewsFilterState g_newsState;
 datetime g_lastNewsRefresh = 0;
 datetime g_lastFullExport = 0;
 datetime g_lastPilotTick = 0;
+datetime g_lastUsdJpyKlineExport = 0;
 
 struct TradeRetryState
 {
@@ -5461,6 +5466,162 @@ void AppendTextFile(string fileName, string content)
    FileClose(handle);
 }
 
+string KlineExporterTimeframeLabel(ENUM_TIMEFRAMES timeframe)
+{
+   if(timeframe == PERIOD_M1)
+      return "M1";
+   if(timeframe == PERIOD_M5)
+      return "M5";
+   if(timeframe == PERIOD_M15)
+      return "M15";
+   if(timeframe == PERIOD_H1)
+      return "H1";
+   return "UNKNOWN";
+}
+
+string KlineExporterSafeSymbol(string symbol)
+{
+   string safe = symbol;
+   StringReplace(safe, "\\", "_");
+   StringReplace(safe, "/", "_");
+   StringReplace(safe, ":", "_");
+   StringReplace(safe, " ", "_");
+   return safe;
+}
+
+string KlineExporterCsvPath(string symbol, string timeframe)
+{
+   return "backtest\\exported_klines\\QuantGod_" + KlineExporterSafeSymbol(symbol) + "_" + timeframe + "_rates.csv";
+}
+
+int ExportUsdJpyKlineTimeframe(string symbol,
+                               ENUM_TIMEFRAMES timeframe,
+                               string timeframeLabel,
+                               datetime fromTime,
+                               datetime toTime,
+                               int maxBars,
+                               string &manifestItems)
+{
+   MqlRates rates[];
+   ArraySetAsSeries(rates, false);
+   int copied = CopyRates(symbol, timeframe, fromTime, toTime, rates);
+   string csvPath = KlineExporterCsvPath(symbol, timeframeLabel);
+   string item = "{";
+   item += "\"timeframe\":\"" + JsonEscape(timeframeLabel) + "\",";
+   item += "\"file\":\"" + JsonEscape(csvPath) + "\",";
+   item += "\"requestedFromServer\":\"" + JsonEscape(FormatDateTime(fromTime, true)) + "\",";
+   item += "\"requestedToServer\":\"" + JsonEscape(FormatDateTime(toTime, true)) + "\",";
+
+   if(copied <= 0)
+   {
+      item += "\"copiedBars\":0,";
+      item += "\"ok\":false,";
+      item += "\"error\":\"" + JsonEscape("CopyRates returned " + IntegerToString(copied) + " err=" + IntegerToString(GetLastError())) + "\"";
+      item += "}";
+      if(StringLen(manifestItems) > 0)
+         manifestItems += ",";
+      manifestItems += item;
+      return 0;
+   }
+
+   int rowsToWrite = copied;
+   if(maxBars > 0 && copied > maxBars)
+      rowsToWrite = maxBars;
+   int startIndex = MathMax(0, copied - rowsToWrite);
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+
+   ResetLastError();
+   int handle = FileOpen(csvPath,
+                         FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         ',',
+                         CP_UTF8);
+   if(handle == INVALID_HANDLE)
+   {
+      item += "\"copiedBars\":0,";
+      item += "\"ok\":false,";
+      item += "\"error\":\"" + JsonEscape("FileOpen failed err=" + IntegerToString(GetLastError())) + "\"";
+      item += "}";
+      if(StringLen(manifestItems) > 0)
+         manifestItems += ",";
+      manifestItems += item;
+      return 0;
+   }
+
+   FileWrite(handle, "epoch", "timestamp", "open", "high", "low", "close", "tick_volume", "spread", "real_volume");
+   for(int i = startIndex; i < copied; i++)
+   {
+      FileWrite(handle,
+                IntegerToString((long)rates[i].time),
+                FormatDateTime(rates[i].time, true),
+                DoubleToString(rates[i].open, digits),
+                DoubleToString(rates[i].high, digits),
+                DoubleToString(rates[i].low, digits),
+                DoubleToString(rates[i].close, digits),
+                IntegerToString((long)rates[i].tick_volume),
+                IntegerToString((long)rates[i].spread),
+                IntegerToString((long)rates[i].real_volume));
+   }
+   FileFlush(handle);
+   FileClose(handle);
+
+   item += "\"copiedBars\":" + IntegerToString(rowsToWrite) + ",";
+   item += "\"ok\":true,";
+   item += "\"oldestServer\":\"" + JsonEscape(FormatDateTime(rates[startIndex].time, true)) + "\",";
+   item += "\"latestServer\":\"" + JsonEscape(FormatDateTime(rates[copied - 1].time, true)) + "\"";
+   item += "}";
+   if(StringLen(manifestItems) > 0)
+      manifestItems += ",";
+   manifestItems += item;
+   return rowsToWrite;
+}
+
+void ExportUsdJpyKlinesIfDue(bool force = false)
+{
+   if(!EnableUsdJpyKlineExporter)
+      return;
+   string symbol = g_focusSymbol;
+   if(StringLen(symbol) <= 0)
+      symbol = "USDJPYc";
+   if(StringFind(symbol, "USDJPY") < 0)
+      return;
+
+   datetime now = CurrentServerTime();
+   int intervalSeconds = MathMax(60, UsdJpyKlineExportIntervalMinutes * 60);
+   if(!force && g_lastUsdJpyKlineExport > 0 && (now - g_lastUsdJpyKlineExport) < intervalSeconds)
+      return;
+
+   FolderCreate("backtest");
+   FolderCreate("backtest\\exported_klines");
+
+   int months = MathMax(1, UsdJpyKlineExportMonths);
+   int maxBars = MathMax(1000, UsdJpyKlineExportMaxBarsPerTimeframe);
+   datetime fromTime = now - months * 31 * 24 * 60 * 60;
+   string items = "";
+   int totalRows = 0;
+   totalRows += ExportUsdJpyKlineTimeframe(symbol, PERIOD_M1, "M1", fromTime, now, maxBars, items);
+   totalRows += ExportUsdJpyKlineTimeframe(symbol, PERIOD_M5, "M5", fromTime, now, maxBars, items);
+   totalRows += ExportUsdJpyKlineTimeframe(symbol, PERIOD_M15, "M15", fromTime, now, maxBars, items);
+   totalRows += ExportUsdJpyKlineTimeframe(symbol, PERIOD_H1, "H1", fromTime, now, maxBars, items);
+
+   string manifest = "{\r\n";
+   manifest += "  \"schema\": \"quantgod.mql5_kline_export_manifest.v1\",\r\n";
+   manifest += "  \"source\": \"MQL5_COPYRATES_EXPORT\",\r\n";
+   manifest += "  \"symbol\": \"" + JsonEscape(symbol) + "\",\r\n";
+   manifest += "  \"focusSymbol\": \"USDJPYc\",\r\n";
+   manifest += "  \"generatedAtServer\": \"" + JsonEscape(FormatDateTime(now, true)) + "\",\r\n";
+   manifest += "  \"generatedAtLocal\": \"" + JsonEscape(FormatDateTime(TimeLocal(), true)) + "\",\r\n";
+   manifest += "  \"lookbackMonths\": " + IntegerToString(months) + ",\r\n";
+   manifest += "  \"maxBarsPerTimeframe\": " + IntegerToString(maxBars) + ",\r\n";
+   manifest += "  \"totalRows\": " + IntegerToString(totalRows) + ",\r\n";
+   manifest += "  \"timeframes\": [" + items + "],\r\n";
+   manifest += "  \"safety\": {\"orderSendAllowed\": false, \"livePresetMutationAllowed\": false}\r\n";
+   manifest += "}\r\n";
+   WriteTextFile("backtest\\exported_klines\\QuantGod_USDJPY_KlineExportManifest.json", manifest);
+   WriteTextFile("QuantGod_USDJPYKlineExportManifest.json", manifest);
+   g_lastUsdJpyKlineExport = now;
+   Print("QuantGod USDJPY CopyRates exporter wrote ", totalRows, " bars across M1/M5/M15/H1.");
+}
+
 int PriceDigitsForSymbol(string symbol)
 {
    if(StringLen(symbol) <= 0)
@@ -7447,6 +7608,7 @@ void OnTick()
 void OnTimer()
 {
    ExportDashboard(true);
+   ExportUsdJpyKlinesIfDue(false);
 }
 
 void OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeRequest& request, const MqlTradeResult& result)

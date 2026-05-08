@@ -122,3 +122,7 @@ PilotMaxConsecutiveLosses=2
 PilotCloseOnKillSwitch=true
 PilotMagic=520001
 PilotDeviationPoints=30
+EnableUsdJpyKlineExporter=true
+UsdJpyKlineExportIntervalMinutes=60
+UsdJpyKlineExportMonths=12
+UsdJpyKlineExportMaxBarsPerTimeframe=700000

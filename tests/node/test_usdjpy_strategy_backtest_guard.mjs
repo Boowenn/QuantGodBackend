@@ -43,6 +43,10 @@ test('USDJPY Strategy JSON backtest writes SQLite, trades, equity, and report ar
     'QuantGod_USDJPYHistoricalKlineSyncReport.json',
     'STRATEGY_JSON_USDJPY_SQLITE_BACKTEST',
     'MT5_COPY_RATES_RANGE',
+    'MQL5_COPYRATES_EXPORT_FALLBACK',
+    'quantgod.mql5_copyrates_export_ingest_report.v1',
+    'QuantGod_USDJPY_KlineExportManifest.json',
+    '_rates.csv',
     'copy_rates_range',
     'QG_USDJPY_HISTORY_LOOKBACK_DAYS',
     'QG_USDJPY_HISTORY_TIMEFRAMES',
@@ -61,6 +65,27 @@ test('USDJPY Strategy JSON backtest writes SQLite, trades, equity, and report ar
     'QG_TELEGRAM_COMMANDS_ALLOWED',
   ]) {
     assert.match(schema + report + store + historySync + runnerSource + runner, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+});
+
+test('MT5 EA exports USDJPY CopyRates CSVs for macOS history fallback', () => {
+  const ea = read('MQL5/Experts/QuantGod_MultiStrategy.mq5');
+  for (const marker of [
+    'EnableUsdJpyKlineExporter',
+    'UsdJpyKlineExportIntervalMinutes',
+    'UsdJpyKlineExportMonths',
+    'ExportUsdJpyKlinesIfDue',
+    'ExportUsdJpyKlineTimeframe',
+    'CopyRates(symbol, timeframe, fromTime, toTime, rates)',
+    'backtest\\\\exported_klines',
+    'QuantGod_USDJPY_KlineExportManifest.json',
+    'QuantGod_USDJPYKlineExportManifest.json',
+    'PERIOD_M1',
+    'PERIOD_M5',
+    'PERIOD_M15',
+    'PERIOD_H1',
+  ]) {
+    assert.match(ea, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 });
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import importlib
 import json
 import os
@@ -28,6 +29,7 @@ MT5_TIMEFRAME_ATTRS = {
     "H1": "TIMEFRAME_H1",
 }
 CHUNK_DAYS = {"M1": 21, "M5": 60, "M15": 120, "H1": 180}
+MQL5_EXPORT_SOURCE = "MQL5_COPYRATES_EXPORT_FALLBACK"
 
 
 def sync_historical_klines(
@@ -88,18 +90,101 @@ def sync_historical_klines(
             report["historyTargetSatisfied"] = _target_satisfied(report.get("historyCoverage", {}), target_days)
             report["reasonZh"] = _reason(report)
         else:
-            report["source"] = "RUNTIME_SNAPSHOT_FALLBACK"
-            report["fallback"] = ingest_runtime_snapshot(runtime_dir)
-            with connect(runtime_dir) as conn:
-                report["historyCoverage"] = bar_coverage_summary(conn)
-            report["ok"] = bool(report["fallback"].get("ok"))
-            report["historyTargetSatisfied"] = False
-            report["reasonZh"] = "未连接到本机 MT5 Python 历史数据源，已回退到运行快照增量写入；GA 历史样本仍不足。"
+            export_report = ingest_mql5_exported_klines(
+                runtime_dir,
+                timeframes=selected_timeframes,
+                symbol=mt5_symbol,
+            )
+            if export_report.get("ok"):
+                report["source"] = MQL5_EXPORT_SOURCE
+                report["fallback"] = {"mql5Export": export_report}
+                with connect(runtime_dir) as conn:
+                    report["historyCoverage"] = bar_coverage_summary(conn)
+                report["ok"] = True
+                report["historyTargetSatisfied"] = _target_satisfied(report.get("historyCoverage", {}), target_days)
+                report["reasonZh"] = _reason(report)
+            else:
+                report["source"] = "RUNTIME_SNAPSHOT_FALLBACK"
+                report["fallback"] = {
+                    "mql5Export": export_report,
+                    "runtimeSnapshot": ingest_runtime_snapshot(runtime_dir),
+                }
+                with connect(runtime_dir) as conn:
+                    report["historyCoverage"] = bar_coverage_summary(conn)
+                report["ok"] = bool(report["fallback"]["runtimeSnapshot"].get("ok"))
+                report["historyTargetSatisfied"] = False
+                report["reasonZh"] = (
+                    "未连接到本机 MT5 Python 历史数据源，也未发现 MQL5 CopyRates 导出；"
+                    "已回退到运行快照增量写入，GA 历史样本仍不足。"
+                )
     finally:
         _shutdown_mt5(mt5)
     if write:
         history_sync_report_path(runtime_dir).parent.mkdir(parents=True, exist_ok=True)
         history_sync_report_path(runtime_dir).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report
+
+
+def ingest_mql5_exported_klines(
+    runtime_dir: Path,
+    *,
+    timeframes: Iterable[str] | None = None,
+    symbol: str | None = None,
+) -> Dict[str, Any]:
+    """Ingest read-only MQL5 CopyRates CSV exports into the USDJPY SQLite store."""
+    runtime_dir = Path(runtime_dir)
+    selected_timeframes = _normalize_timeframes(timeframes)
+    source_symbol = symbol or os.environ.get("QG_USDJPY_MT5_SYMBOL") or FOCUS_SYMBOL
+    export_dir = runtime_dir / "backtest" / "exported_klines"
+    manifest = _load_export_manifest(runtime_dir, export_dir)
+    report: Dict[str, Any] = {
+        "ok": False,
+        "schema": "quantgod.mql5_copyrates_export_ingest_report.v1",
+        "source": "MQL5_COPYRATES_EXPORT",
+        "symbol": FOCUS_SYMBOL,
+        "sourceSymbol": source_symbol,
+        "exportDir": str(export_dir),
+        "manifest": manifest,
+        "timeframes": {},
+        "safety": dict(SAFETY_BOUNDARY),
+    }
+    if not export_dir.exists():
+        report["reasonZh"] = "未发现 MQL5 CopyRates 导出目录，等待 EA/脚本写入 K 线 CSV。"
+        return report
+
+    any_rows = False
+    with connect(runtime_dir) as conn:
+        for timeframe in selected_timeframes:
+            file_path = _find_mql5_export_file(export_dir, source_symbol, timeframe)
+            before_count = count_bars(conn, timeframe)
+            bars: List[Bar] = []
+            errors: List[str] = []
+            if file_path is None:
+                errors.append(f"missing export csv for {timeframe}")
+            else:
+                bars, errors = _read_mql5_export_csv(file_path)
+                if bars:
+                    upsert_bars(conn, timeframe, bars)
+                    any_rows = True
+            after_count = count_bars(conn, timeframe)
+            report["timeframes"][timeframe] = {
+                "timeframe": timeframe,
+                "file": str(file_path) if file_path else "",
+                "rowsRead": len(bars),
+                "barCountBefore": before_count,
+                "barCountAfter": after_count,
+                "newBarDelta": max(0, after_count - before_count),
+                "earliestBar": earliest_bar_time(conn, timeframe),
+                "latestBar": latest_bar_time(conn, timeframe),
+                "errors": errors[:5],
+            }
+        report["historyCoverage"] = bar_coverage_summary(conn)
+    report["ok"] = any_rows
+    report["reasonZh"] = (
+        "已从 MQL5/Files 的 CopyRates CSV 导出增量写入 USDJPY SQLite。"
+        if any_rows
+        else "发现 MQL5 导出目录，但没有可用 USDJPY K 线 CSV。"
+    )
     return report
 
 
@@ -195,6 +280,90 @@ def _rates_to_bars(rates: Any) -> List[Bar]:
         except Exception:
             continue
     return sorted(bars, key=lambda item: item.timestamp)
+
+
+def _load_export_manifest(runtime_dir: Path, export_dir: Path) -> Dict[str, Any]:
+    for path in (
+        export_dir / "QuantGod_USDJPY_KlineExportManifest.json",
+        runtime_dir / "QuantGod_USDJPYKlineExportManifest.json",
+    ):
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {"unreadablePath": str(path)}
+    return {}
+
+
+def _find_mql5_export_file(export_dir: Path, source_symbol: str, timeframe: str) -> Path | None:
+    candidates = [
+        export_dir / f"QuantGod_{_safe_export_symbol(source_symbol)}_{timeframe}_rates.csv",
+        export_dir / f"QuantGod_{_safe_export_symbol(FOCUS_SYMBOL)}_{timeframe}_rates.csv",
+        export_dir / f"QuantGod_USDJPY_{timeframe}_rates.csv",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    matches = sorted(export_dir.glob(f"QuantGod_*USDJPY*_{timeframe}_rates.csv"))
+    return matches[-1] if matches else None
+
+
+def _safe_export_symbol(symbol: str) -> str:
+    value = str(symbol or FOCUS_SYMBOL)
+    for old in ("\\", "/", ":", " "):
+        value = value.replace(old, "_")
+    return value
+
+
+def _read_mql5_export_csv(path: Path) -> Tuple[List[Bar], List[str]]:
+    bars: List[Bar] = []
+    errors: List[str] = []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row_index, row in enumerate(reader, start=2):
+                try:
+                    timestamp = _export_row_timestamp(row)
+                    if not timestamp:
+                        continue
+                    bars.append(
+                        Bar(
+                            timestamp=timestamp,
+                            open=float(row.get("open") or 0),
+                            high=float(row.get("high") or 0),
+                            low=float(row.get("low") or 0),
+                            close=float(row.get("close") or 0),
+                            volume=float(row.get("tick_volume") or row.get("volume") or row.get("real_volume") or 0),
+                        )
+                    )
+                except Exception as exc:
+                    if len(errors) < 5:
+                        errors.append(f"{path.name}:{row_index}: {exc}")
+    except FileNotFoundError:
+        errors.append(f"missing file: {path}")
+    except Exception as exc:
+        errors.append(f"read failed: {exc}")
+    return sorted(bars, key=lambda item: item.timestamp), errors
+
+
+def _export_row_timestamp(row: Dict[str, Any]) -> str | None:
+    epoch = row.get("epoch") or row.get("time")
+    if epoch not in (None, ""):
+        return _epoch_to_iso(epoch)
+    raw = str(row.get("timestamp") or "").strip()
+    if not raw:
+        return None
+    parsed = _parse_iso(raw)
+    if parsed is not None:
+        return _iso(parsed)
+    for fmt in ("%Y.%m.%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return _iso(datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc))
+        except Exception:
+            continue
+    return None
 
 
 def _row_value(row: Any, key: str, default: Any = None) -> Any:

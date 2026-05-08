@@ -4,6 +4,7 @@ import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.strategy_json.schema import ALLOWED_STRATEGY_FAMILIES
 from tools.strategy_ga.fitness import evidence_metrics, score_seed
@@ -199,6 +200,38 @@ class USDJPYStrategyBacktestTests(unittest.TestCase):
                 sys.modules.pop("MetaTrader5", None)
             else:
                 sys.modules["MetaTrader5"] = old_module
+
+    def test_history_sync_ingests_mql5_copyrates_exports_when_mt5_python_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            export_dir = runtime_dir / "backtest" / "exported_klines"
+            export_dir.mkdir(parents=True)
+            base_epoch = int(datetime(2026, 5, 7, tzinfo=timezone.utc).timestamp())
+            steps = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600}
+            for timeframe, step in steps.items():
+                rows = ["epoch,timestamp,open,high,low,close,tick_volume,spread,real_volume"]
+                for index in range(3):
+                    epoch = base_epoch + index * step
+                    rows.append(
+                        f"{epoch},2026.05.07 00:0{index}:00,156.{index},156.{index + 1},"
+                        f"155.{index},156.{index + 1},100{index},10,0"
+                    )
+                (export_dir / f"QuantGod_USDJPYc_{timeframe}_rates.csv").write_text("\n".join(rows), encoding="utf-8")
+            (export_dir / "QuantGod_USDJPY_KlineExportManifest.json").write_text(
+                '{"schema":"quantgod.mql5_kline_export_manifest.v1","source":"MQL5_COPYRATES_EXPORT"}',
+                encoding="utf-8",
+            )
+
+            with patch("tools.usdjpy_strategy_backtest.history_sync.importlib.import_module", side_effect=ImportError("no mt5")):
+                report = sync_historical_klines(runtime_dir, lookback_days=3, timeframes=("M1", "M5", "M15", "H1"))
+
+            self.assertTrue(report["ok"], report)
+            self.assertEqual(report["source"], "MQL5_COPYRATES_EXPORT_FALLBACK")
+            self.assertTrue(report["fallback"]["mql5Export"]["ok"])
+            self.assertEqual(report["fallback"]["mql5Export"]["source"], "MQL5_COPYRATES_EXPORT")
+            with connect(runtime_dir) as conn:
+                for timeframe in ("M1", "M5", "M15", "H1"):
+                    self.assertEqual(count_bars(conn, timeframe), 3)
 
 
 if __name__ == "__main__":

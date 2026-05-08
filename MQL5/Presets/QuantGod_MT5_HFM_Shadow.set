@@ -14,3 +14,7 @@ ShadowCandidateMaxSourceRows=800
 EnableUsdJpyTokyoBreakoutShadowResearch=true
 EnableUsdJpyNightReversionShadowResearch=true
 EnableUsdJpyH4PullbackShadowResearch=true
+EnableUsdJpyKlineExporter=true
+UsdJpyKlineExportIntervalMinutes=60
+UsdJpyKlineExportMonths=12
+UsdJpyKlineExportMaxBarsPerTimeframe=700000
