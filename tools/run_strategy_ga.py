@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from strategy_ga.generation_runner import build_ga_status, read_candidates, read_generations, run_generation
+from strategy_ga.generation_runner import build_ga_status, read_candidate, read_candidates, read_generations, run_generation
 from strategy_ga.schema import BLOCKER_FILE, EVOLUTION_PATH_FILE, ga_dir
 from strategy_ga.telegram_text import ga_to_chinese_text
 from usdjpy_evidence_os.telegram_gateway import dispatch_text
@@ -79,9 +79,7 @@ def main(argv=None) -> int:
     if args.command == "candidates":
         return emit(read_candidates(runtime_dir))
     if args.command == "candidate":
-        rows = read_candidates(runtime_dir).get("candidates", [])
-        match = next((row for row in rows if row.get("seedId") == args.seed_id), None)
-        return emit({"ok": bool(match), "candidate": match})
+        return emit(read_candidate(runtime_dir, args.seed_id))
     if args.command == "evolution-path":
         return emit(_load_json(ga_dir(runtime_dir) / EVOLUTION_PATH_FILE))
     if args.command == "blockers":

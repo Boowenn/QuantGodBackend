@@ -91,6 +91,12 @@ test('GA trace records process details rather than final result only', () => {
     'QuantGod_GAFitnessCache.json',
     'QuantGod_GALineage.json',
     'QuantGod_GACandidateRuns.jsonl',
+    'candidate_audit',
+    'evidenceChain',
+    'sourceTrace',
+    'equityCurve',
+    'parentCount',
+    'childCount',
   ]) {
     assert.match(runner + fitness + mutation + crossover + schema + cache + lineage + seedGenerator, new RegExp(marker));
   }

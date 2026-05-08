@@ -3,7 +3,7 @@ import unittest
 import os
 from pathlib import Path
 
-from tools.strategy_ga.generation_runner import read_candidates, run_generation
+from tools.strategy_ga.generation_runner import read_candidate, read_candidates, run_generation
 from tools.strategy_ga.telegram_text import ga_to_chinese_text
 from tools.strategy_json.schema import base_strategy_seed
 from tools.strategy_json.validator import validate_strategy_json
@@ -87,6 +87,19 @@ class StrategyJsonGATests(unittest.TestCase):
 
             latest = read_candidates(runtime_dir)
             self.assertEqual(len(latest["candidates"]), len(result["candidates"]))
+
+            detail = read_candidate(runtime_dir, result["candidates"][0]["seedId"])
+            self.assertTrue(detail["ok"], detail)
+            audit = detail["candidate"]["audit"]
+            self.assertEqual(audit["schema"], "quantgod.ga.candidate_audit.v1")
+            self.assertIn("lineage", audit)
+            self.assertIn("sourceTrace", audit)
+            self.assertIn("backtest", audit)
+            self.assertIn("evidenceChain", audit)
+            self.assertTrue(audit["backtest"]["present"])
+            self.assertIn("equityCurve", audit["backtest"])
+            self.assertIsInstance(audit["evidenceChain"], list)
+            self.assertTrue(any(item["step"] == "USDJPY SQLite 回测" for item in audit["evidenceChain"]))
 
     def test_case_memory_seeds_cache_and_lineage_are_written(self):
         with tempfile.TemporaryDirectory() as tmp:

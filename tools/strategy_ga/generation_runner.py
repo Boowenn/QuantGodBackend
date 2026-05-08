@@ -339,3 +339,183 @@ def read_candidates(runtime_dir: Path) -> Dict[str, Any]:
             except Exception:
                 continue
     return {"ok": True, "candidates": rows, "generation": latest.get("generation"), "safety": dict(SAFETY_BOUNDARY)}
+
+
+def read_candidate(runtime_dir: Path, seed_id: str) -> Dict[str, Any]:
+    rows = read_candidates(runtime_dir).get("candidates", [])
+    match = next((row for row in rows if str(row.get("seedId") or "") == seed_id), None)
+    if not match:
+        return {
+            "ok": False,
+            "candidate": None,
+            "seedId": seed_id,
+            "reasonZh": "没有找到该 GA seed；请先运行 GA 一代或刷新候选列表。",
+            "safety": dict(SAFETY_BOUNDARY),
+        }
+    enriched = dict(match)
+    enriched["audit"] = {
+        "schema": "quantgod.ga.candidate_audit.v1",
+        "agentVersion": AGENT_VERSION,
+        "seedId": seed_id,
+        "lineage": _lineage_audit(runtime_dir, seed_id),
+        "sourceTrace": _source_trace(match),
+        "backtest": _candidate_backtest_audit(runtime_dir, match),
+        "evidenceChain": _candidate_evidence_chain(match),
+        "safety": dict(SAFETY_BOUNDARY),
+    }
+    return {"ok": True, "candidate": enriched, "safety": dict(SAFETY_BOUNDARY)}
+
+
+def _lineage_audit(runtime_dir: Path, seed_id: str) -> Dict[str, Any]:
+    lineage = read_lineage(runtime_dir)
+    nodes = lineage.get("nodes") if isinstance(lineage.get("nodes"), list) else []
+    edges = lineage.get("edges") if isinstance(lineage.get("edges"), list) else []
+    nodes_by_id = {str(node.get("seedId")): node for node in nodes if isinstance(node, dict)}
+    parent_edges = [edge for edge in edges if isinstance(edge, dict) and str(edge.get("to")) == seed_id]
+    child_edges = [edge for edge in edges if isinstance(edge, dict) and str(edge.get("from")) == seed_id]
+    parents = [_lineage_endpoint(edge, nodes_by_id, "from") for edge in parent_edges]
+    children = [_lineage_endpoint(edge, nodes_by_id, "to") for edge in child_edges]
+    return {
+        "node": nodes_by_id.get(seed_id, {}),
+        "parents": parents,
+        "children": children,
+        "parentCount": len(parents),
+        "childCount": len(children),
+        "reasonZh": _lineage_reason(parents),
+    }
+
+
+def _lineage_endpoint(edge: Dict[str, Any], nodes_by_id: Dict[str, Dict[str, Any]], key: str) -> Dict[str, Any]:
+    endpoint = str(edge.get(key) or "")
+    return {
+        "seedId": endpoint,
+        "type": edge.get("type"),
+        "node": nodes_by_id.get(endpoint, {}),
+    }
+
+
+def _lineage_reason(parents: List[Dict[str, Any]]) -> str:
+    if not parents:
+        return "初始种子或归档导入，没有父代。"
+    types = {str(item.get("type") or "") for item in parents}
+    if "CROSSOVER" in types:
+        return "该 seed 来自同策略族父代交叉。"
+    if "MUTATION" in types:
+        return "该 seed 来自父代参数变异。"
+    if "CASE_MEMORY" in types:
+        return "该 seed 来自 Case Memory 经验线索。"
+    return "该 seed 存在父代 lineage 记录。"
+
+
+def _source_trace(row: Dict[str, Any]) -> Dict[str, Any]:
+    seed = row.get("strategyJson") if isinstance(row.get("strategyJson"), dict) else {}
+    parent_ids = seed.get("parentSeedIds") if isinstance(seed.get("parentSeedIds"), list) else []
+    if seed.get("parentSeedId"):
+        parent_ids = [seed.get("parentSeedId"), *parent_ids]
+    return {
+        "source": row.get("source"),
+        "parentSeedIds": [item for item in parent_ids if item],
+        "caseId": seed.get("caseId"),
+        "mutationHint": seed.get("mutationHint"),
+        "strategyFamily": row.get("strategyFamily"),
+        "direction": row.get("direction"),
+        "reasonZh": _source_reason(row.get("source"), seed),
+    }
+
+
+def _source_reason(source: Any, seed: Dict[str, Any]) -> str:
+    source_text = str(source or "LLM_SEED")
+    if source_text == "MUTATION":
+        return f"来自父代 {seed.get('parentSeedId') or 'unknown'} 的参数变异。"
+    if source_text == "CROSSOVER":
+        parents = ", ".join(str(item) for item in seed.get("parentSeedIds", []) if item)
+        return f"来自同策略族父代交叉：{parents or 'unknown'}。"
+    if source_text == "CASE_MEMORY":
+        return f"来自 Case Memory：{seed.get('caseId') or 'unknown'}。"
+    return "来自初始 Strategy JSON seed pool。"
+
+
+def _candidate_backtest_audit(runtime_dir: Path, row: Dict[str, Any]) -> Dict[str, Any]:
+    seed = row.get("strategyJson") if isinstance(row.get("strategyJson"), dict) else None
+    if not seed:
+        return {"present": False, "ok": False, "reasonZh": "候选缺少 Strategy JSON，无法回测。"}
+    try:
+        try:
+            from tools.usdjpy_strategy_backtest.report import run_backtest
+        except ModuleNotFoundError:  # pragma: no cover
+            from usdjpy_strategy_backtest.report import run_backtest
+
+        report = run_backtest(runtime_dir, seed, write=False)
+    except Exception as exc:  # pragma: no cover - defensive audit path
+        return {"present": False, "ok": False, "reasonZh": f"候选回测审计生成失败：{exc}"}
+    equity = report.get("equityCurve") if isinstance(report.get("equityCurve"), list) else []
+    trades = report.get("trades") if isinstance(report.get("trades"), list) else []
+    return {
+        "present": True,
+        "ok": bool(report.get("ok")),
+        "runId": report.get("runId"),
+        "strategyId": report.get("strategyId"),
+        "seedId": report.get("seedId"),
+        "metrics": report.get("metrics") if isinstance(report.get("metrics"), dict) else {},
+        "evidenceQuality": report.get("evidenceQuality"),
+        "equityCurve": _sample_equity_curve(equity),
+        "equityPointCount": len(equity),
+        "trades": trades[-20:],
+        "tradeCount": len(trades),
+        "engine": report.get("engine") if isinstance(report.get("engine"), dict) else {},
+        "reasonZh": report.get("reasonZh") or "Strategy JSON 已生成候选专属回测审计。",
+    }
+
+
+def _sample_equity_curve(values: List[Any], limit: int = 160) -> List[Dict[str, Any]]:
+    if not values:
+        return []
+    if len(values) <= limit:
+        indexes = list(range(len(values)))
+    else:
+        step = (len(values) - 1) / max(1, limit - 1)
+        indexes = sorted({round(index * step) for index in range(limit)})
+    points: List[Dict[str, Any]] = []
+    for index in indexes:
+        try:
+            value = float(values[index])
+        except Exception:
+            continue
+        points.append({"index": index + 1, "equityR": round(value, 4)})
+    return points
+
+
+def _candidate_evidence_chain(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    validation = row.get("validation") if isinstance(row.get("validation"), dict) else {}
+    fitness = row.get("fitnessBreakdown") if isinstance(row.get("fitnessBreakdown"), dict) else {}
+    backtest = fitness.get("strategyBacktest") if isinstance(fitness.get("strategyBacktest"), dict) else {}
+    parity = fitness.get("parity") if isinstance(fitness.get("parity"), dict) else {}
+    execution = fitness.get("executionFeedback") if isinstance(fitness.get("executionFeedback"), dict) else {}
+    blocker = row.get("blockerCode")
+    return [
+        {
+            "step": "Strategy JSON 校验",
+            "status": "PASS" if validation.get("valid") else "FAIL",
+            "reasonZh": validation.get("reasonZh") or ("Strategy JSON 合法" if validation.get("valid") else "Strategy JSON 未通过校验"),
+        },
+        {
+            "step": "USDJPY SQLite 回测",
+            "status": "PASS" if backtest.get("ok") else "FAIL",
+            "reasonZh": backtest.get("reasonZh") or ("回测已进入 fitness" if backtest.get("present") else "缺少回测证据"),
+        },
+        {
+            "step": "三方 Parity",
+            "status": parity.get("promotionGateStatus") or parity.get("status") or "WAITING",
+            "reasonZh": parity.get("reasonZh") or "等待 Strategy JSON / Python Replay / MQL5 EA 三方一致性证据。",
+        },
+        {
+            "step": "执行反馈",
+            "status": execution.get("promotionGateStatus") or execution.get("fieldCompletenessStatus") or "WAITING",
+            "reasonZh": execution.get("reasonZh") or "等待 LiveExecutionFeedback 字段契约和执行质量证据。",
+        },
+        {
+            "step": "Fitness / 晋级",
+            "status": row.get("status") or "UNKNOWN",
+            "reasonZh": row.get("blockerZh") or explain_blocker(blocker) or "通过 fitness 排名，进入候选晋级路径。",
+        },
+    ]
