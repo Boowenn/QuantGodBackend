@@ -255,6 +255,7 @@ class DailyAutopilotTests(unittest.TestCase):
                 "-n",
                 "tools/run_mac_daily_autopilot.sh",
                 "tools/run_mac_agent_v25_loop.sh",
+                "tools/run_mac_usdjpy_history_sync_loop.sh",
                 "tools/run_mac_polymarket_readonly_cycle.sh",
             ],
             cwd=repo_root,
@@ -278,6 +279,19 @@ class DailyAutopilotTests(unittest.TestCase):
         self.assertIn("--symbols USDJPYc", agent_loop)
         self.assertIn("QG_AGENT_V25_INTERVAL_SECONDS", agent_loop)
         self.assertIn("QG_TELEGRAM_COMMANDS_ALLOWED", agent_loop)
+
+    def test_mac_history_sync_wrapper_uses_mt5_python_and_terminal_path(self):
+        repo_root = MODULE_PATH.parents[1]
+        script = (repo_root / "tools" / "run_mac_usdjpy_history_sync_loop.sh").read_text(encoding="utf-8")
+        self.assertIn("sync-klines", script)
+        self.assertIn("QG_MT5_TERMINAL_PATH", script)
+        self.assertIn("QG_MT5_PYTHON_BIN", script)
+        self.assertIn("QG_USDJPY_HISTORY_MONTHS", script)
+        self.assertIn("QG_USDJPY_HISTORY_TIMEFRAMES", script)
+        self.assertIn("QG_USDJPY_HISTORY_INTERVAL_SECONDS", script)
+        self.assertIn("QG_USDJPY_HISTORY_MAX_BARS", script)
+        self.assertIn("--terminal-path", script)
+        self.assertIn("--max-bars-per-timeframe", script)
 
     def test_mt5_permission_log_is_not_triage_when_current_dashboard_recovered(self):
         with tempfile.TemporaryDirectory() as tmp:

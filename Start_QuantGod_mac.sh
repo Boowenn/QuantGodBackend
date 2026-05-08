@@ -95,6 +95,14 @@ WINE64="$MT5_APP_PATH/Contents/SharedSupport/wine/bin/wine64"
 MT5_SHADOW_CONFIG="$MT5_PREFIX/drive_c/qg/QuantGod_MT5_HFM_Shadow_mac.ini"
 MT5_LIVE_CONFIG="$MT5_PREFIX/drive_c/qg/QuantGod_MT5_HFM_LivePilot_mac.ini"
 
+export QG_MT5_TERMINAL_PATH="${QG_MT5_TERMINAL_PATH:-$MT5_ROOT/terminal64.exe}"
+export QG_MT5_PYTHON_BIN="${QG_MT5_PYTHON_BIN:-$QG_PYTHON_BIN}"
+export QG_USDJPY_HISTORY_SYNC_ENABLED="${QG_USDJPY_HISTORY_SYNC_ENABLED:-1}"
+export QG_USDJPY_HISTORY_INTERVAL_SECONDS="${QG_USDJPY_HISTORY_INTERVAL_SECONDS:-3600}"
+export QG_USDJPY_HISTORY_MONTHS="${QG_USDJPY_HISTORY_MONTHS:-12}"
+export QG_USDJPY_HISTORY_TIMEFRAMES="${QG_USDJPY_HISTORY_TIMEFRAMES:-M1,M5,M15,H1}"
+export QG_USDJPY_HISTORY_MAX_BARS="${QG_USDJPY_HISTORY_MAX_BARS:-700000}"
+export QG_USDJPY_MT5_SYMBOL="${QG_USDJPY_MT5_SYMBOL:-USDJPYc}"
 export QG_PARAMLAB_HFM_ROOT="${QG_PARAMLAB_HFM_ROOT:-$SCRIPT_DIR/runtime/ParamLab_Tester_Sandbox/live_hfm_placeholder}"
 export QG_PARAMLAB_TESTER_ROOT="${QG_PARAMLAB_TESTER_ROOT:-$SCRIPT_DIR/runtime/HFM_MT5_Tester_Isolated}"
 export QG_MT5_TESTER_ROOT="${QG_MT5_TESTER_ROOT:-$QG_PARAMLAB_TESTER_ROOT}"
@@ -104,6 +112,7 @@ MT5_LIVE_SCREEN="${QG_MT5_LIVE_SCREEN:-quantgod-mt5-live}"
 BACKEND_API_SCREEN="${QG_BACKEND_API_SCREEN:-quantgod-backend-api}"
 FRONTEND_SCREEN="${QG_FRONTEND_SCREEN:-quantgod-frontend-dev}"
 AGENT_V25_SCREEN="${QG_AGENT_V25_SCREEN:-quantgod-agent-v25}"
+HISTORY_SYNC_SCREEN="${QG_USDJPY_HISTORY_SYNC_SCREEN:-quantgod-usdjpy-history-sync}"
 LEGACY_DAILY_AUTOPILOT_SCREEN="${QG_DAILY_AUTOPILOT_SCREEN:-quantgod-daily-autopilot}"
 
 RUNTIME_SOURCE="${QG_MAC_RUNTIME_SOURCE:-auto}"
@@ -133,6 +142,9 @@ echo "Focus symbol: $QG_FOCUS_SYMBOL"
 echo "MT5 start mode: $MT5_START_MODE"
 echo "MT5 start symbol: $MT5_START_SYMBOL"
 echo "MT5 live launch allowed: $MT5_LIVE_LAUNCH_ALLOWED"
+echo "MT5 terminal path: $QG_MT5_TERMINAL_PATH"
+echo "MT5 Python bin: $QG_MT5_PYTHON_BIN"
+echo "USDJPY history sync: $QG_USDJPY_HISTORY_SYNC_ENABLED every ${QG_USDJPY_HISTORY_INTERVAL_SECONDS}s for ${QG_USDJPY_HISTORY_MONTHS} months"
 echo "Frontend: http://$QG_FRONTEND_HOST:$QG_FRONTEND_PORT/vue/?workspace=mt5"
 echo "Backend API: http://$QG_DASHBOARD_HOST:$QG_DASHBOARD_PORT/vue/"
 
@@ -228,6 +240,11 @@ if [[ "$AGENT_V25_ENABLED" == "1" ]]; then
     "cd '$SCRIPT_DIR' && exec bash tools/run_mac_agent_v25_loop.sh --loop"
 fi
 
+if [[ "$QG_USDJPY_HISTORY_SYNC_ENABLED" == "1" ]]; then
+  start_screen "$HISTORY_SYNC_SCREEN" "$SCRIPT_DIR/runtime/usdjpy_history_sync_screen.log" \
+    "cd '$SCRIPT_DIR' && exec bash tools/run_mac_usdjpy_history_sync_loop.sh --loop"
+fi
+
 if [[ "$LEGACY_DAILY_AUTOPILOT_ENABLED" == "1" ]]; then
   start_screen "$LEGACY_DAILY_AUTOPILOT_SCREEN" "$SCRIPT_DIR/runtime/daily_autopilot_legacy_screen.log" \
     "cd '$SCRIPT_DIR' && exec bash tools/run_mac_daily_autopilot.sh --loop"
@@ -237,4 +254,4 @@ open "http://$QG_FRONTEND_HOST:$QG_FRONTEND_PORT/vue/?workspace=mt5" || \
   open "http://$QG_DASHBOARD_HOST:$QG_DASHBOARD_PORT/vue/?workspace=mt5" || true
 
 echo "QuantGod v2.5 launcher complete."
-echo "Screens: $BACKEND_API_SCREEN, $FRONTEND_SCREEN, $AGENT_V25_SCREEN, $MT5_LIVE_SCREEN"
+echo "Screens: $BACKEND_API_SCREEN, $FRONTEND_SCREEN, $AGENT_V25_SCREEN, $HISTORY_SYNC_SCREEN, $MT5_LIVE_SCREEN"

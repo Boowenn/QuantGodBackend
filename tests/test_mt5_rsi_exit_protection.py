@@ -243,14 +243,19 @@ class Mt5RsiExitProtectionTests(unittest.TestCase):
         self.assertIn("quantgod-backend-api", launcher_text)
         self.assertIn("quantgod-frontend-dev", launcher_text)
         self.assertIn("quantgod-agent-v25", launcher_text)
+        self.assertIn("quantgod-usdjpy-history-sync", launcher_text)
         self.assertIn("tools/run_mac_agent_v25_loop.sh --loop", launcher_text)
+        self.assertIn("tools/run_mac_usdjpy_history_sync_loop.sh --loop", launcher_text)
+        self.assertIn("QG_MT5_TERMINAL_PATH", launcher_text)
+        self.assertIn("QG_MT5_PYTHON_BIN", launcher_text)
+        self.assertIn("QG_USDJPY_HISTORY_SYNC_ENABLED", launcher_text)
         self.assertIn("MT5_SHADOW_SCREEN", launcher_text)
         self.assertIn("MT5_LIVE_SCREEN", launcher_text)
         self.assertIn("terminal64.exe /portable", launcher_text)
         self.assertIn("QuantGod_MT5_HFM_Shadow_mac.ini", launcher_text)
         self.assertIn("QuantGod_MT5_HFM_LivePilot_mac.ini", launcher_text)
         self.assertIn("AllowLiveTrading=0", launcher_text)
-        self.assertTrue(launcher_text.rstrip().endswith('echo "Screens: $BACKEND_API_SCREEN, $FRONTEND_SCREEN, $AGENT_V25_SCREEN, $MT5_LIVE_SCREEN"'))
+        self.assertTrue(launcher_text.rstrip().endswith('echo "Screens: $BACKEND_API_SCREEN, $FRONTEND_SCREEN, $AGENT_V25_SCREEN, $HISTORY_SYNC_SCREEN, $MT5_LIVE_SCREEN"'))
 
     def test_live_and_usdjpy_backtest_presets_include_rsi_fast_exit(self):
         for path in (LIVE_PRESET_PATH, BACKTEST_USDJPY_PATH):
