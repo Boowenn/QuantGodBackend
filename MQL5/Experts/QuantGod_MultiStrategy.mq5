@@ -7601,6 +7601,7 @@ void OnTick()
    if(now - g_lastFullExport >= 5)
    {
       ExportDashboard(false);
+      ExportUsdJpyKlinesIfDue(false);
       g_lastFullExport = now;
    }
 }
