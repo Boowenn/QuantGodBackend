@@ -113,6 +113,10 @@ def evidence_metrics(runtime_dir: Path, seed: Dict[str, Any] | None = None) -> D
             "avgLatencyMs": _num(execution_metrics.get("avgLatencyMs"), 0),
             "acceptedWithoutFillCount": int(_num(execution_metrics.get("acceptedWithoutFillCount"), 0)),
             "policyMismatchCount": int(_num(execution_metrics.get("policyMismatchCount"), 0)),
+            "fieldCompletenessStatus": execution_metrics.get("fieldCompletenessStatus") or "",
+            "fieldCoveragePct": _num(execution_metrics.get("fieldCoveragePct"), 0),
+            "coreMissingFieldCount": int(_num(execution_metrics.get("coreMissingFieldCount"), 0)),
+            "conditionalMissingFieldCount": int(_num(execution_metrics.get("conditionalMissingFieldCount"), 0)),
             "penalty": execution_penalty,
         },
         "caseMemory": {
@@ -189,7 +193,24 @@ def _execution_penalty(metrics: Dict[str, Any]) -> float:
     latency_penalty = max(0.0, _num(metrics.get("avgLatencyMs"), 0) - 1500.0) / 3000.0
     mismatch_penalty = min(0.5, _num(metrics.get("policyMismatchCount"), 0) * 0.25)
     ack_fill_penalty = min(0.25, max(0.0, _num(metrics.get("acceptedWithoutFillCount"), 0) - 2.0) * 0.05)
-    return round(min(1.25, reject_penalty + reject_count_penalty + slippage_penalty + latency_penalty + mismatch_penalty + ack_fill_penalty), 4)
+    field_gap_penalty = min(
+        0.75,
+        _num(metrics.get("coreMissingFieldCount"), 0) * 0.2
+        + _num(metrics.get("conditionalMissingFieldCount"), 0) * 0.08,
+    )
+    return round(
+        min(
+            1.25,
+            reject_penalty
+            + reject_count_penalty
+            + slippage_penalty
+            + latency_penalty
+            + mismatch_penalty
+            + ack_fill_penalty
+            + field_gap_penalty,
+        ),
+        4,
+    )
 
 
 def _parity_penalty(status: str, promotion_gate: Dict[str, Any]) -> float:

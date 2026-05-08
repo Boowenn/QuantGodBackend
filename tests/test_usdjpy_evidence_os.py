@@ -68,8 +68,8 @@ class USDJPYEvidenceOSTests(unittest.TestCase):
             (runtime_dir / "QuantGod_LiveExecutionFeedbackHistory.jsonl").write_text(
                 "\n".join(
                     [
-                        '{"schema":"quantgod.live_execution_feedback.v1","feedbackId":"history-001","eventType":"ORDER_FILL","symbol":"USDJPYc","side":"BUY","policyId":"USDJPY_LIVE_LOOP","strategyId":"RSI_Reversal","dealTicket":1,"fillPrice":155.24,"profitR":0.0}',
-                        '{"schema":"quantgod.live_execution_feedback.v1","feedbackId":"history-002","eventType":"ORDER_CLOSE","symbol":"USDJPYc","side":"SELL","policyId":"USDJPY_LIVE_LOOP","strategyId":"RSI_Reversal","dealTicket":2,"fillPrice":155.42,"profitR":0.45,"exitReason":"HISTORY_EXIT"}',
+                        '{"schema":"quantgod.live_execution_feedback.v1","feedbackId":"history-001","eventType":"ORDER_FILL","symbol":"USDJPYc","side":"BUY","policyId":"USDJPY_LIVE_LOOP","strategyId":"RSI_Reversal","intentId":"history-001","dealTicket":1,"fillPrice":155.24,"slippagePips":0.1,"latencyMs":0,"profitR":0.0}',
+                        '{"schema":"quantgod.live_execution_feedback.v1","feedbackId":"history-002","eventType":"ORDER_CLOSE","symbol":"USDJPYc","side":"SELL","policyId":"USDJPY_LIVE_LOOP","strategyId":"RSI_Reversal","intentId":"history-002","dealTicket":2,"fillPrice":155.42,"slippagePips":0.0,"latencyMs":0,"profitR":0.45,"mfeR":0.7,"maeR":-0.2,"exitReason":"HISTORY_EXIT"}',
                     ]
                 ),
                 encoding="utf-8",
@@ -88,6 +88,10 @@ class USDJPYEvidenceOSTests(unittest.TestCase):
             self.assertIn("QuantGod_LiveExecutionFeedbackHistory.jsonl", sources)
             self.assertIn("qualityGates", evidence["executionFeedback"])
             self.assertIn("promotionGate", evidence["executionFeedback"])
+            self.assertIn("fieldCompleteness", evidence["executionFeedback"])
+            self.assertEqual(evidence["executionFeedback"]["fieldCompleteness"]["status"], "PASS")
+            self.assertEqual(evidence["executionFeedback"]["metrics"]["fieldCompletenessStatus"], "PASS")
+            self.assertEqual(evidence["executionFeedback"]["recentFeedback"][0]["intentId"], "pilot-001")
             self.assertIn(evidence["executionFeedback"]["promotionGate"]["status"], {"PASS", "WATCH", "BLOCKED"})
             self.assertIn("parityDimensions", evidence["parity"])
             self.assertFalse(evidence["safety"]["orderSendAllowed"])
@@ -137,11 +141,15 @@ class USDJPYEvidenceOSTests(unittest.TestCase):
             self.assertGreater(metrics["avgAbsSlippagePips"], 0.8)
             self.assertGreater(metrics["avgLatencyMs"], 1500)
             self.assertEqual(metrics["policyMismatchCount"], 1)
+            self.assertEqual(evidence["executionFeedback"]["fieldCompleteness"]["status"], "BLOCKED")
+            self.assertGreater(evidence["executionFeedback"]["metrics"]["coreMissingFieldCount"], 0)
+            self.assertIn("intentId", evidence["executionFeedback"]["fieldCompleteness"]["missingCounts"])
             self.assertEqual(evidence["executionFeedback"]["promotionGate"]["status"], "BLOCKED")
             self.assertFalse(evidence["executionFeedback"]["promotionGate"]["promotionAllowed"])
             self.assertGreaterEqual(len(evidence["executionFeedback"]["caseMemoryTriggers"]), 1)
 
             cases = evidence["caseMemory"]
+            self.assertIn("EXECUTION_FEEDBACK_SCHEMA_GAP", cases["caseTypeCounts"])
             self.assertIn("EXECUTION_SLIPPAGE", cases["caseTypeCounts"])
             self.assertIn("EXECUTION_LATENCY", cases["caseTypeCounts"])
             self.assertIn("POLICY_MISMATCH", cases["caseTypeCounts"])

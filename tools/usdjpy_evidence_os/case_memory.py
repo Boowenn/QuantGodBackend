@@ -190,7 +190,13 @@ def _ga_seed_hints(cases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _default_priority(case_type: str) -> str:
-    if case_type in {"POLICY_MISMATCH", "EXECUTION_REJECT", "EXECUTION_SLIPPAGE", "EXECUTION_LATENCY"}:
+    if case_type in {
+        "POLICY_MISMATCH",
+        "EXECUTION_REJECT",
+        "EXECUTION_SLIPPAGE",
+        "EXECUTION_LATENCY",
+        "EXECUTION_FEEDBACK_SCHEMA_GAP",
+    }:
         return "HIGH"
     if case_type in {"MISSED_BIG_MOVE", "EARLY_EXIT", "BAD_ENTRY", "GA_OVERFIT"}:
         return "MEDIUM"

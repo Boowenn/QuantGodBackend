@@ -14,6 +14,25 @@ from .schema import (
     execution_feedback_path,
 )
 
+AUDITED_FEEDBACK_SOURCES = {
+    "QuantGod_LiveExecutionFeedback.jsonl",
+    "QuantGod_LiveExecutionFeedbackHistory.jsonl",
+}
+
+REQUIRED_LIVE_EXECUTION_FIELDS = {
+    "core": ("policyId", "intentId", "eventType", "symbol", "strategyId"),
+    "send": ("expectedPrice", "latencyMs"),
+    "fill": ("fillPrice", "slippagePips", "latencyMs"),
+    "reject": ("rejectReason", "latencyMs"),
+    "outcome": ("profitR", "mfeR", "maeR", "exitReason"),
+}
+
+SEND_EVENT_TYPES = {"ORDER_ACCEPTED", "ORDER_SEND", "ORDER_REQUESTED"}
+FILL_EVENT_TYPES = {"ORDER_FILL"}
+CLOSE_EVENT_TYPES = {"ORDER_CLOSE", "POSITION_CLOSE", "HISTORY_CLOSE"}
+REJECT_EVENT_TYPES = {"ORDER_REJECT", "ORDER_REJECTED"}
+OUTCOME_EVENT_TYPES = CLOSE_EVENT_TYPES | {"TRADE_OUTCOME", "HISTORY_OUTCOME"}
+
 
 def build_execution_feedback(runtime_dir: Path, write: bool = True) -> Dict[str, Any]:
     rows = _collect_rows(runtime_dir)
@@ -21,8 +40,16 @@ def build_execution_feedback(runtime_dir: Path, write: bool = True) -> Dict[str,
         [_normalize_row(index, row, source) for index, (row, source) in enumerate(rows, start=1)]
     )
     metrics = _metrics(normalized)
-    quality_gates = _quality_gates_from_metrics(metrics)
-    promotion_gate = _promotion_gate(metrics, quality_gates)
+    field_completeness = _field_completeness(normalized)
+    metrics = {
+        **metrics,
+        "fieldCoveragePct": field_completeness.get("fieldCoveragePct", 0.0),
+        "coreMissingFieldCount": field_completeness.get("coreMissingFieldCount", 0),
+        "conditionalMissingFieldCount": field_completeness.get("conditionalMissingFieldCount", 0),
+        "fieldCompletenessStatus": field_completeness.get("status"),
+    }
+    quality_gates = _quality_gates_from_metrics(metrics, field_completeness)
+    promotion_gate = _promotion_gate(metrics, quality_gates, field_completeness)
     case_memory_triggers = _case_memory_triggers(metrics, promotion_gate)
     report = {
         "ok": True,
@@ -32,6 +59,7 @@ def build_execution_feedback(runtime_dir: Path, write: bool = True) -> Dict[str,
         "symbol": FOCUS_SYMBOL,
         "sampleCount": len(normalized),
         "metrics": metrics,
+        "fieldCompleteness": field_completeness,
         "qualityGates": quality_gates,
         "promotionGate": promotion_gate,
         "caseMemoryTriggers": case_memory_triggers,
@@ -89,6 +117,7 @@ def _read_csv(path: Path) -> List[Dict[str, Any]]:
 
 def _normalize_row(index: int, row: Dict[str, Any], source: str) -> Dict[str, Any]:
     symbol = _first(row, "symbol", "Symbol") or FOCUS_SYMBOL
+    event_type = _first(row, "eventType", "EventType")
     expected_price = _num(_first(row, "expectedPrice", "entryPrice", "EntryPrice", "openPrice"))
     fill_price = _num(_first(row, "fillPrice", "price", "Price", "exitPrice", "ClosePrice"))
     slippage_pips = _num(_first(row, "slippagePips", "SlippagePips"))
@@ -97,15 +126,20 @@ def _normalize_row(index: int, row: Dict[str, Any], source: str) -> Dict[str, An
     retcode = _first(row, "retcode", "Retcode", "retCode")
     reject_reason = _reject_reason(row, retcode)
     feedback_id = _feedback_id(index, row, source)
+    raw_policy_id = _first(row, "policyId", "PolicyId")
+    raw_intent_id = _first(row, "intentId", "IntentId")
+    raw_strategy_id = _first(row, "strategyId", "strategy", "Strategy")
+    raw_field_presence = _field_presence(row, source, event_type, retcode)
     return {
         "schema": "quantgod.live_execution_feedback.v1",
         "feedbackId": feedback_id,
         "createdAt": utc_now_iso(),
         "symbol": symbol,
-        "eventType": _first(row, "eventType", "EventType"),
+        "eventType": event_type,
         "side": _first(row, "side", "Side"),
-        "policyId": _first(row, "policyId", "intentId", "status", "Status") or "USDJPY_LIVE_LOOP",
-        "strategyId": _first(row, "strategyId", "strategy", "Strategy") or "RSI_Reversal",
+        "policyId": raw_policy_id or "USDJPY_LIVE_LOOP",
+        "intentId": raw_intent_id or feedback_id,
+        "strategyId": raw_strategy_id or "RSI_Reversal",
         "entrySignalTime": _first(row, "entrySignalTime", "createdAt", "generatedAtServer", "timestamp", "time", "Time"),
         "orderSendTime": _first(row, "orderSendTime", "generatedAt", "generatedAtServer", "sendTime"),
         "fillTime": _first(row, "fillTime", "eventTimeServer", "CloseTime", "exitTime"),
@@ -121,6 +155,7 @@ def _normalize_row(index: int, row: Dict[str, Any], source: str) -> Dict[str, An
         "mfeR": _num(_first(row, "mfeR", "MfeR")),
         "maeR": _num(_first(row, "maeR", "MaeR")),
         "source": source,
+        "fieldPresence": raw_field_presence,
         "sourceKeys": sorted(row.keys())[:20],
         "safety": dict(SAFETY_BOUNDARY),
     }
@@ -180,10 +215,11 @@ def _metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _quality_gates(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return _quality_gates_from_metrics(_metrics(rows))
+    field_completeness = _field_completeness(rows)
+    return _quality_gates_from_metrics(_metrics(rows), field_completeness)
 
 
-def _quality_gates_from_metrics(metrics: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _quality_gates_from_metrics(metrics: Dict[str, Any], field_completeness: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [
         {
             "name": "slippage",
@@ -210,10 +246,19 @@ def _quality_gates_from_metrics(metrics: Dict[str, Any]) -> List[Dict[str, Any]]
             "status": "PASS" if int(metrics["policyMismatchCount"]) == 0 else "WARN",
             "reasonZh": "未发现 policy 与执行明显偏离" if int(metrics["policyMismatchCount"]) == 0 else "发现 policy 阻断态仍有执行痕迹，需要复盘",
         },
+        {
+            "name": "field_contract",
+            "status": "PASS" if field_completeness.get("status") == "PASS" else "WARN",
+            "reasonZh": field_completeness.get("reasonZh") or "LiveExecutionFeedback 字段契约仍需继续观察。",
+        },
     ]
 
 
-def _promotion_gate(metrics: Dict[str, Any], quality_gates: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _promotion_gate(
+    metrics: Dict[str, Any],
+    quality_gates: List[Dict[str, Any]],
+    field_completeness: Dict[str, Any],
+) -> Dict[str, Any]:
     rows = int(metrics.get("feedbackRows") or 0)
     if rows <= 0:
         return {
@@ -286,6 +331,24 @@ def _promotion_gate(metrics: Dict[str, Any], quality_gates: List[Dict[str, Any]]
             3000,
             "EXECUTION_LATENCY",
             "reduce_execution_latency",
+        )
+
+    field_status = str(field_completeness.get("status") or "WAITING_FEEDBACK")
+    if field_status == "BLOCKED":
+        add_blocker(
+            "LIVE_EXECUTION_FEEDBACK_FIELD_GAP",
+            field_completeness.get("reasonZh") or "EA LiveExecutionFeedback 缺少稳定必填字段，不能用于晋级。",
+            field_completeness.get("fieldCoveragePct"),
+            "100%",
+            "EXECUTION_FEEDBACK_SCHEMA_GAP",
+            "stabilize_live_execution_feedback_fields",
+        )
+    elif field_status in {"WATCH", "WAITING_FEEDBACK"}:
+        warnings.append(
+            {
+                "code": "LIVE_EXECUTION_FEEDBACK_FIELD_STABILITY_WATCH",
+                "reasonZh": field_completeness.get("reasonZh") or "EA LiveExecutionFeedback 字段仍需继续收集样本。",
+            }
         )
 
     for gate in quality_gates:
@@ -373,6 +436,139 @@ def _next_action_zh(promotion_gate: Dict[str, Any]) -> str:
     return "等待 EA 输出标准化 LiveExecutionFeedback 后再评估执行质量。"
 
 
+def _field_presence(row: Dict[str, Any], source: str, event_type: Any, retcode: Any) -> Dict[str, Any]:
+    reject_reason = _reject_reason(row, retcode)
+    return {
+        "audited": source in AUDITED_FEEDBACK_SOURCES,
+        "eventTypeNormalized": str(event_type or "").upper(),
+        "policyId": _has_field(row, "policyId", "PolicyId"),
+        "intentId": _has_field(row, "intentId", "IntentId"),
+        "eventType": _has_field(row, "eventType", "EventType"),
+        "symbol": _has_field(row, "symbol", "Symbol"),
+        "strategyId": _has_field(row, "strategyId", "strategy", "Strategy"),
+        "expectedPrice": _has_field(row, "expectedPrice", "entryPrice", "EntryPrice", "openPrice"),
+        "fillPrice": _has_field(row, "fillPrice", "price", "Price", "exitPrice", "ClosePrice"),
+        "slippagePips": _has_field(row, "slippagePips", "SlippagePips"),
+        "latencyMs": _has_field(row, "latencyMs", "LatencyMs"),
+        "rejectReason": bool(reject_reason),
+        "exitReason": _has_field(row, "exitReason", "ExitReason"),
+        "profitR": _has_field(row, "profitR", "ProfitR"),
+        "mfeR": _has_field(row, "mfeR", "MfeR"),
+        "maeR": _has_field(row, "maeR", "MaeR"),
+    }
+
+
+def _field_completeness(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    audited_rows = [row for row in rows if ((row.get("fieldPresence") or {}).get("audited"))]
+    missing_counts: Dict[str, int] = {}
+    row_issues: List[Dict[str, Any]] = []
+    required_checks = 0
+    present_checks = 0
+    fill_rows = 0
+    reject_rows = 0
+    outcome_rows = 0
+
+    def require(row: Dict[str, Any], fields: Iterable[str], group: str) -> None:
+        nonlocal required_checks, present_checks
+        presence = row.get("fieldPresence") if isinstance(row.get("fieldPresence"), dict) else {}
+        missing = []
+        for field in fields:
+            required_checks += 1
+            if presence.get(field):
+                present_checks += 1
+            else:
+                missing.append(field)
+                missing_counts[field] = missing_counts.get(field, 0) + 1
+        if missing:
+            row_issues.append(
+                {
+                    "feedbackId": row.get("feedbackId"),
+                    "source": row.get("source"),
+                    "eventType": row.get("eventType"),
+                    "group": group,
+                    "missingFields": missing,
+                }
+            )
+
+    for row in audited_rows:
+        presence = row.get("fieldPresence") if isinstance(row.get("fieldPresence"), dict) else {}
+        event_type = str(presence.get("eventTypeNormalized") or row.get("eventType") or "").upper()
+        require(row, REQUIRED_LIVE_EXECUTION_FIELDS["core"], "core")
+        if event_type in SEND_EVENT_TYPES:
+            require(row, REQUIRED_LIVE_EXECUTION_FIELDS["send"], "send")
+        if event_type in FILL_EVENT_TYPES:
+            fill_rows += 1
+            require(row, REQUIRED_LIVE_EXECUTION_FIELDS["fill"], "fill")
+        if event_type in CLOSE_EVENT_TYPES:
+            fill_rows += 1
+            outcome_rows += 1
+            require(row, REQUIRED_LIVE_EXECUTION_FIELDS["fill"], "fill")
+            require(row, REQUIRED_LIVE_EXECUTION_FIELDS["outcome"], "outcome")
+        if event_type in REJECT_EVENT_TYPES:
+            reject_rows += 1
+            require(row, REQUIRED_LIVE_EXECUTION_FIELDS["reject"], "reject")
+        if event_type in OUTCOME_EVENT_TYPES and event_type not in CLOSE_EVENT_TYPES:
+            outcome_rows += 1
+            require(row, REQUIRED_LIVE_EXECUTION_FIELDS["outcome"], "outcome")
+
+    field_coverage = round((present_checks / required_checks * 100.0), 2) if required_checks else 0.0
+    core_missing_count = sum(int(missing_counts.get(field, 0)) for field in REQUIRED_LIVE_EXECUTION_FIELDS["core"])
+    conditional_missing_count = sum(
+        int(value)
+        for key, value in missing_counts.items()
+        if key not in REQUIRED_LIVE_EXECUTION_FIELDS["core"]
+    )
+    warnings: List[Dict[str, Any]] = []
+    if not audited_rows:
+        status = "WAITING_FEEDBACK"
+        reason = "尚未看到 EA 标准化 LiveExecutionFeedback 文件；无法证明 policyId、intentId、成交、滑点、延迟和 R 倍数字段长期稳定。"
+    elif core_missing_count or conditional_missing_count:
+        status = "BLOCKED"
+        reason = "EA LiveExecutionFeedback 缺少必填字段；必须先稳定 policyId、intentId、fill/slippage/latency、profitR/mfeR/maeR 或 rejectReason。"
+    else:
+        status = "PASS"
+        reason = "EA LiveExecutionFeedback 必填字段契约通过；policyId、intentId、成交、滑点、延迟、拒单和出场 R 字段按事件类型稳定输出。"
+    if audited_rows and fill_rows == 0:
+        status = "WATCH" if status == "PASS" else status
+        warnings.append(
+            {
+                "code": "NO_FILL_SAMPLE_YET",
+                "reasonZh": "尚未看到成交样本；fillPrice/slippagePips/latencyMs 需要继续用真实成交验证。",
+            }
+        )
+        if status == "WATCH":
+            reason = "字段身份契约已通过，但还缺真实成交样本来验证 fill/slippage/latency 长期稳定。"
+    if audited_rows and outcome_rows == 0:
+        status = "WATCH" if status == "PASS" else status
+        warnings.append(
+            {
+                "code": "NO_OUTCOME_SAMPLE_YET",
+                "reasonZh": "尚未看到平仓/结果样本；profitR/mfeR/maeR 需要继续用真实结果验证。",
+            }
+        )
+        if status == "WATCH":
+            reason = "字段身份契约已通过，但还缺平仓结果样本来验证 profitR/mfeR/maeR 长期稳定。"
+    return {
+        "schema": "quantgod.live_execution_field_completeness.v1",
+        "status": status,
+        "auditedSources": sorted(AUDITED_FEEDBACK_SOURCES),
+        "auditedRows": len(audited_rows),
+        "requiredChecks": required_checks,
+        "presentChecks": present_checks,
+        "fieldCoveragePct": field_coverage,
+        "requiredFields": REQUIRED_LIVE_EXECUTION_FIELDS,
+        "missingCounts": missing_counts,
+        "coreMissingFieldCount": core_missing_count,
+        "conditionalMissingFieldCount": conditional_missing_count,
+        "fillSampleCount": fill_rows,
+        "rejectSampleCount": reject_rows,
+        "outcomeSampleCount": outcome_rows,
+        "warnings": warnings,
+        "rowIssues": row_issues[:50],
+        "reasonZh": reason,
+    }
+
+
 def _dedupe_feedback(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen = set()
     deduped: List[Dict[str, Any]] = []
@@ -390,6 +586,10 @@ def _first(row: Dict[str, Any], *keys: str) -> Any:
         if key in row and row[key] not in {None, ""}:
             return row[key]
     return None
+
+
+def _has_field(row: Dict[str, Any], *keys: str) -> bool:
+    return _first(row, *keys) is not None
 
 
 def _num(value: Any) -> float:
@@ -410,16 +610,14 @@ def _feedback_quality(rows: int, fills: int, rejects: int) -> str:
 
 
 def _reject_reason(row: Dict[str, Any], retcode: Any) -> str:
-    explicit = _first(row, "rejectReason", "mainBlocker", "reason", "Reason")
-    if explicit:
-        return str(explicit)
     event_type = str(_first(row, "eventType", "EventType") or "").upper()
+    explicit = _first(row, "rejectReason", "mainBlocker", "reason", "Reason")
     if event_type in {"ORDER_REJECT", "ORDER_REJECTED"}:
-        return "ORDER_REJECTED"
+        return str(explicit) if explicit else "ORDER_REJECTED"
     code = str(retcode or "").strip()
     if not code or code in {"0", "10009", "10008"}:
         return ""
-    return f"MT5_RETCODE_{code}"
+    return str(explicit) if explicit else f"MT5_RETCODE_{code}"
 
 
 def _dominant_reject_reason(rejects: List[Dict[str, Any]]) -> str:
