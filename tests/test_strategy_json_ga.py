@@ -107,6 +107,11 @@ class StrategyJsonGATests(unittest.TestCase):
             self.assertIn("fold", audit["lineageTree"])
             self.assertIn("canExpand", audit["lineageTree"]["fold"])
             self.assertTrue(any(node.get("selected") for node in audit["lineageTree"]["nodes"]))
+            self.assertIn("lineagePath", audit)
+            self.assertEqual(audit["lineagePath"]["schema"], "quantgod.ga.lineage_path.v1")
+            self.assertIsInstance(audit["lineagePath"]["nodes"], list)
+            self.assertIn("bestFitnessEnd", audit["lineagePath"])
+            self.assertIn("fitnessDelta", audit["lineagePath"])
             self.assertIsInstance(audit["evidenceChain"], list)
             self.assertTrue(any(item["step"] == "USDJPY SQLite 回测" for item in audit["evidenceChain"]))
 

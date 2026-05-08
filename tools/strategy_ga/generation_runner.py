@@ -354,12 +354,15 @@ def read_candidate(runtime_dir: Path, seed_id: str) -> Dict[str, Any]:
             "safety": dict(SAFETY_BOUNDARY),
         }
     enriched = dict(match)
+    lineage = _lineage_audit(runtime_dir, seed_id)
+    lineage_tree = _lineage_tree_audit(runtime_dir, seed_id)
     enriched["audit"] = {
         "schema": "quantgod.ga.candidate_audit.v1",
         "agentVersion": AGENT_VERSION,
         "seedId": seed_id,
-        "lineage": _lineage_audit(runtime_dir, seed_id),
-        "lineageTree": _lineage_tree_audit(runtime_dir, seed_id),
+        "lineage": lineage,
+        "lineageTree": lineage_tree,
+        "lineagePath": _lineage_path_audit(seed_id, lineage_tree),
         "sourceTrace": _source_trace(match),
         "backtest": _candidate_backtest_audit(runtime_dir, match),
         "evidenceChain": _candidate_evidence_chain(match),
@@ -382,7 +385,14 @@ def _candidate_rows_by_id(runtime_dir: Path) -> Dict[str, Dict[str, Any]]:
             continue
         seed_id = str(row.get("seedId") or "")
         if seed_id:
-            rows_by_id[seed_id] = row
+            if seed_id not in rows_by_id:
+                rows_by_id[seed_id] = row
+            else:
+                rows_by_id[seed_id]["latestGeneration"] = row.get("generation")
+                rows_by_id[seed_id]["latestGenerationId"] = row.get("generationId")
+                rows_by_id[seed_id]["latestStatus"] = row.get("status")
+                rows_by_id[seed_id]["latestPromotionStage"] = row.get("promotionStage")
+                rows_by_id[seed_id]["latestFitness"] = row.get("fitness")
     return rows_by_id
 
 
@@ -507,6 +517,101 @@ def _lineage_tree_audit(runtime_dir: Path, seed_id: str) -> Dict[str, Any]:
     }
 
 
+def _lineage_path_audit(seed_id: str, lineage_tree: Dict[str, Any]) -> Dict[str, Any]:
+    nodes = lineage_tree.get("nodes") if isinstance(lineage_tree.get("nodes"), list) else []
+    edges = lineage_tree.get("edges") if isinstance(lineage_tree.get("edges"), list) else []
+    node_by_id = {
+        str(node.get("seedId") or ""): node
+        for node in nodes
+        if isinstance(node, dict) and node.get("seedId")
+    }
+    path_ids = [
+        str(item)
+        for item in lineage_tree.get("elitePathSeedIds", [])
+        if str(item or "")
+    ]
+    if not path_ids and seed_id:
+        path_ids = [seed_id]
+    edge_by_pair = {
+        (str(edge.get("from") or ""), str(edge.get("to") or "")): edge
+        for edge in edges
+        if isinstance(edge, dict)
+    }
+    path_nodes: List[Dict[str, Any]] = []
+    previous_fitness: Optional[float] = None
+    previous_id: Optional[str] = None
+    for index, current_id in enumerate(path_ids, start=1):
+        node = node_by_id.get(current_id) or _external_lineage_node(current_id)
+        fitness = _safe_float(node.get("fitness"))
+        edge = edge_by_pair.get((previous_id or "", current_id), {}) if previous_id else {}
+        path_node = {
+            "order": index,
+            "seedId": current_id,
+            "generation": node.get("generation"),
+            "generationId": node.get("generationId"),
+            "strategyId": node.get("strategyId"),
+            "strategyFamily": node.get("strategyFamily"),
+            "source": node.get("source"),
+            "status": node.get("status"),
+            "promotionStage": node.get("promotionStage"),
+            "fitness": fitness,
+            "selected": current_id == seed_id,
+            "onElitePath": True,
+            "lineageEdgeType": edge.get("type") if edge else None,
+            "lineageEdgeReasonZh": edge.get("reasonZh") if edge else None,
+            "fitnessDeltaFromPrevious": (
+                round(fitness - previous_fitness, 4)
+                if fitness is not None and previous_fitness is not None
+                else None
+            ),
+        }
+        path_nodes.append(path_node)
+        previous_id = current_id
+        if fitness is not None:
+            previous_fitness = fitness
+    fitness_values = [
+        node.get("fitness")
+        for node in path_nodes
+        if isinstance(node.get("fitness"), (int, float))
+    ]
+    generations = [
+        int(node.get("generation"))
+        for node in path_nodes
+        if isinstance(node.get("generation"), int)
+    ]
+    start_fitness = fitness_values[0] if fitness_values else None
+    end_fitness = fitness_values[-1] if fitness_values else None
+    return {
+        "schema": "quantgod.ga.lineage_path.v1",
+        "agentVersion": AGENT_VERSION,
+        "seedId": seed_id,
+        "nodes": path_nodes,
+        "nodeCount": len(path_nodes),
+        "edgeCount": max(0, len(path_nodes) - 1),
+        "generationCount": len(set(generations)),
+        "generationSpan": {
+            "from": min(generations) if generations else None,
+            "to": max(generations) if generations else None,
+        },
+        "bestFitnessStart": start_fitness,
+        "bestFitnessEnd": end_fitness,
+        "fitnessDelta": (
+            round(end_fitness - start_fitness, 4)
+            if start_fitness is not None and end_fitness is not None
+            else None
+        ),
+        "reasonZh": _lineage_path_reason(path_nodes),
+    }
+
+
+def _lineage_path_reason(path_nodes: List[Dict[str, Any]]) -> str:
+    if len(path_nodes) <= 1:
+        return "当前 seed 暂无跨代主血统；通常是第一代 seed、归档导入或尚未产生 mutation/crossover。"
+    mutation_count = sum(1 for node in path_nodes if node.get("lineageEdgeType") == "MUTATION")
+    crossover_count = sum(1 for node in path_nodes if node.get("lineageEdgeType") == "CROSSOVER")
+    return f"已串联 {len(path_nodes)} 个主血统节点；mutation {mutation_count} 次，crossover {crossover_count} 次。"
+
+
 def _lineage_node_index(rows_by_id: Dict[str, Dict[str, Any]], latest_nodes: List[Any]) -> Dict[str, Dict[str, Any]]:
     nodes: Dict[str, Dict[str, Any]] = {}
     for seed_id, row in rows_by_id.items():
@@ -538,6 +643,11 @@ def _lineage_node_from_candidate(seed_id: str, row: Dict[str, Any]) -> Dict[str,
         "rank": row.get("rank"),
         "status": row.get("status"),
         "promotionStage": row.get("promotionStage"),
+        "latestGeneration": row.get("latestGeneration"),
+        "latestGenerationId": row.get("latestGenerationId"),
+        "latestStatus": row.get("latestStatus"),
+        "latestPromotionStage": row.get("latestPromotionStage"),
+        "latestFitness": row.get("latestFitness"),
         "blockerCode": row.get("blockerCode"),
         "blockerZh": row.get("blockerZh"),
         "external": False,
