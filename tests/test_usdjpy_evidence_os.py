@@ -250,6 +250,112 @@ class USDJPYEvidenceOSTests(unittest.TestCase):
             blocker_names = {row["name"] for row in parity["promotionGate"]["blockers"]}
             self.assertIn("strategy_json_vs_mql5_rsi_diagnostics", blocker_names)
 
+    def test_deep_parity_matrix_passes_when_strategy_replay_and_ea_align(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            run_backtest(runtime_dir, write=True)
+            replay_dir = runtime_dir / "replay" / "usdjpy"
+            replay_dir.mkdir(parents=True)
+            (replay_dir / "QuantGod_USDJPYBarReplayReport.json").write_text(
+                """
+                {
+                  "schema": "quantgod.usdjpy_bar_replay.report.v1",
+                  "symbol": "USDJPYc",
+                  "causalReplay": {
+                    "posteriorMayAffectTrigger": false,
+                    "posteriorUsedForScoringOnly": true
+                  },
+                  "entryComparison": {
+                    "causalReplay": {
+                      "posteriorMayAffectTrigger": false,
+                      "hardGatesNeverRelaxed": ["runtime", "fastlane", "highImpactNews", "spread", "session", "cooldown", "startup", "capacity"],
+                      "ordinaryNewsBlocksLive": false
+                    },
+                    "events": {
+                      "current": [
+                        {
+                          "allowed": true,
+                          "hardGatePass": true,
+                          "tacticalGatePass": true,
+                          "hardBlockers": [],
+                          "tacticalBlockers": [],
+                          "posteriorUsedForTrigger": false
+                        }
+                      ]
+                    }
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+            live_dir = runtime_dir / "live"
+            live_dir.mkdir(parents=True)
+            (live_dir / "QuantGod_USDJPYLiveLoopStatus.json").write_text(
+                """
+                {
+                  "topLiveEligiblePolicy": {
+                    "strategy": "RSI_Reversal",
+                    "direction": "LONG",
+                    "entryMode": "OPPORTUNITY_ENTRY"
+                  },
+                  "safety": {
+                    "orderSendAllowed": false,
+                    "livePresetMutationAllowed": false
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+            (runtime_dir / "QuantGod_USDJPYRsiEntryDiagnostics.json").write_text(
+                """
+                {
+                  "schema": "quantgod.mt5.usdjpy_rsi_entry_diagnostics.v1",
+                  "symbol": "USDJPYc",
+                  "strategy": "RSI_Reversal",
+                  "direction": "LONG",
+                  "state": "READY_BUY_SIGNAL",
+                  "route": {
+                    "timeframe": "H1",
+                    "candidateEnabled": true,
+                    "liveEnabled": true,
+                    "inScope": true
+                  },
+                  "permissions": {
+                    "liveMode": true,
+                    "tradeAllowed": true,
+                    "readOnlyMode": false
+                  },
+                  "guards": {
+                    "sessionOpen": true,
+                    "spreadAllowed": true,
+                    "newsBlocked": false,
+                    "cooldownActive": false,
+                    "startupGuardActive": false,
+                    "symbolPositions": 0,
+                    "maxPositionsPerSymbol": 2
+                  },
+                  "rsi": {
+                    "period": 14,
+                    "oversold": 34,
+                    "crossbackThreshold": 0.8,
+                    "signalReady": true,
+                    "signalDirection": "LONG",
+                    "evalCode": "READY"
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            parity = build_parity_report(runtime_dir, write=True)
+            self.assertEqual(parity["status"], "PARITY_PASS")
+            self.assertEqual(parity["promotionGate"]["status"], "PASS")
+            self.assertEqual(parity["deepParity"]["status"], "PASS")
+            check_by_name = {row["name"]: row for row in parity["checks"]}
+            self.assertEqual(check_by_name["strategy_json_python_replay_mql5_gate_matrix"]["status"], "PASS")
+            self.assertIn("pythonReplay", parity["deepParity"])
+            self.assertIn("mql5Ea", parity["deepParity"])
+
     def test_independent_telegram_gateway_queues_dedupes_and_dispatches(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime_dir = Path(tmp)

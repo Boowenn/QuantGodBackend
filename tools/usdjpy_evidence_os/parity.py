@@ -10,6 +10,7 @@ PROMOTION_HARD_CHECKS = {
     "strategy_json_backtest_engine_v2",
     "strategy_json_vs_live_loop_policy",
     "strategy_json_vs_mql5_rsi_diagnostics",
+    "strategy_json_python_replay_mql5_gate_matrix",
     "backtest_no_execution",
     "live_loop_no_frontend_execution",
 }
@@ -21,6 +22,7 @@ def build_parity_report(runtime_dir: Path, write: bool = True) -> Dict[str, Any]
     live_loop = load_json(runtime_dir / "live" / "QuantGod_USDJPYLiveLoopStatus.json")
     diagnostics = load_json(runtime_dir / "QuantGod_USDJPYRsiEntryDiagnostics.json")
 
+    deep_gate_check = _check_deep_gate_matrix(backtest, replay, diagnostics)
     checks: List[Dict[str, Any]] = [
         _check_equal("symbol", backtest.get("symbol"), FOCUS_SYMBOL, required=True),
         _check_equal("strategy_family", backtest.get("strategyFamily"), "RSI_Reversal", required=False),
@@ -29,6 +31,7 @@ def build_parity_report(runtime_dir: Path, write: bool = True) -> Dict[str, Any]
         _check_sqlite_persistence(backtest),
         _check_parity_vector_vs_live(backtest, live_loop),
         _check_parity_vector_vs_ea(backtest, diagnostics),
+        deep_gate_check,
         _check_present("bar_replay_report", replay),
         _check_present("live_loop_status", live_loop),
         _check_present("ea_rsi_diagnostics", diagnostics),
@@ -48,6 +51,7 @@ def build_parity_report(runtime_dir: Path, write: bool = True) -> Dict[str, Any]
         "status": status,
         "checks": checks,
         "promotionGate": promotion_gate,
+        "deepParity": deep_gate_check.get("actual") if isinstance(deep_gate_check.get("actual"), dict) else {},
         "parityDimensions": _parity_dimensions(backtest, live_loop, diagnostics),
         "summary": _summary(checks),
         "reasonZh": _reason_zh(status),
@@ -209,6 +213,165 @@ def _check_parity_vector_vs_ea(backtest: Dict[str, Any], diagnostics: Dict[str, 
     }
 
 
+def _check_deep_gate_matrix(backtest: Dict[str, Any], replay: Dict[str, Any], diagnostics: Dict[str, Any]) -> Dict[str, Any]:
+    vector = ((backtest.get("engine") or {}).get("parityVector") or {}) if isinstance(backtest.get("engine"), dict) else {}
+    missing_sources = []
+    if not vector:
+        missing_sources.append("Strategy JSON parityVector")
+    if not replay:
+        missing_sources.append("Python bar replay report")
+    if not diagnostics:
+        missing_sources.append("MQL5 RSI diagnostics")
+
+    matrix = _deep_gate_matrix(vector, replay, diagnostics)
+    if missing_sources:
+        matrix["missingSources"] = missing_sources
+        return {
+            "name": "strategy_json_python_replay_mql5_gate_matrix",
+            "status": "MISSING",
+            "required": False,
+            "promotionCritical": True,
+            "actual": matrix,
+            "reasonZh": "等待 Strategy JSON、Python 回放和 MQL5 EA 三方证据同时可用；同步前不能晋级。",
+        }
+
+    mismatches = matrix.get("hardMismatches") if isinstance(matrix.get("hardMismatches"), list) else []
+    status = "PASS" if not mismatches else "FAIL"
+    return {
+        "name": "strategy_json_python_replay_mql5_gate_matrix",
+        "status": status,
+        "required": bool(mismatches),
+        "promotionCritical": True,
+        "actual": matrix,
+        "reasonZh": "Strategy JSON / Python Replay / MQL5 EA 深度门禁矩阵一致"
+        if status == "PASS"
+        else "Strategy JSON / Python Replay / MQL5 EA 深度门禁矩阵存在硬差异：" + ", ".join(mismatches),
+    }
+
+
+def _deep_gate_matrix(vector: Dict[str, Any], replay: Dict[str, Any], diagnostics: Dict[str, Any]) -> Dict[str, Any]:
+    vector_rsi = vector.get("rsi") if isinstance(vector.get("rsi"), dict) else {}
+    entry_conditions = vector.get("entryConditions") if isinstance(vector.get("entryConditions"), list) else []
+    diag_route = diagnostics.get("route") if isinstance(diagnostics.get("route"), dict) else {}
+    diag_guards = diagnostics.get("guards") if isinstance(diagnostics.get("guards"), dict) else {}
+    diag_permissions = diagnostics.get("permissions") if isinstance(diagnostics.get("permissions"), dict) else {}
+    diag_rsi = diagnostics.get("rsi") if isinstance(diagnostics.get("rsi"), dict) else {}
+    replay_causal = replay.get("causalReplay") if isinstance(replay.get("causalReplay"), dict) else {}
+    replay_entry = replay.get("entryComparison") if isinstance(replay.get("entryComparison"), dict) else {}
+    replay_entry_causal = replay_entry.get("causalReplay") if isinstance(replay_entry.get("causalReplay"), dict) else {}
+    replay_events = replay_entry.get("events") if isinstance(replay_entry.get("events"), dict) else {}
+    replay_current_events = replay_events.get("current") if isinstance(replay_events.get("current"), list) else []
+    sample_event = replay_current_events[0] if replay_current_events and isinstance(replay_current_events[0], dict) else {}
+
+    missing_optional: List[str] = []
+    hard_mismatches: List[str] = []
+    if vector.get("strategyFamily") and vector.get("strategyFamily") != (diagnostics.get("strategy") or diagnostics.get("strategyFamily") or "RSI_Reversal"):
+        hard_mismatches.append("strategyFamily")
+    if str(vector.get("direction") or "").upper() != str(diagnostics.get("direction") or "LONG").upper():
+        hard_mismatches.append("direction")
+    _compare_number("rsi.period", vector_rsi.get("period"), diag_rsi.get("period"), hard_mismatches, missing_optional, tolerance=0.0)
+    _compare_text("rsi.timeframe", vector_rsi.get("timeframe"), diag_route.get("timeframe"), hard_mismatches, missing_optional)
+    _compare_number("rsi.buyBand", vector_rsi.get("buyBand"), diag_rsi.get("oversold"), hard_mismatches, missing_optional, tolerance=0.01)
+    if _present(vector_rsi.get("crossbackThreshold")) and not _present(diag_rsi.get("crossbackThreshold")):
+        missing_optional.append("mql5.rsi.crossbackThreshold")
+    signal_direction = str(diag_rsi.get("signalDirection") or "").upper()
+    if signal_direction not in {"", "NONE", str(vector.get("direction") or "").upper()}:
+        hard_mismatches.append("mql5.rsi.signalDirection")
+
+    if replay_causal.get("posteriorMayAffectTrigger") is True or replay_entry_causal.get("posteriorMayAffectTrigger") is True:
+        hard_mismatches.append("pythonReplay.posteriorLeakage")
+    if replay_causal.get("posteriorUsedForScoringOnly") is False:
+        hard_mismatches.append("pythonReplay.posteriorScoringOnly")
+    hard_gates = _lower_set(replay_entry_causal.get("hardGatesNeverRelaxed") or [])
+    required_replay_hard_gates = {"runtime", "fastlane", "spread", "highimpactnews"}
+    missing_hard_gates = sorted(required_replay_hard_gates - hard_gates)
+    if missing_hard_gates:
+        hard_mismatches.append("pythonReplay.hardGatesNeverRelaxed:" + "/".join(missing_hard_gates))
+    if replay_entry_causal.get("ordinaryNewsBlocksLive") is True:
+        hard_mismatches.append("pythonReplay.ordinaryNewsStillHardBlocks")
+
+    for key in ("sessionOpen", "spreadAllowed", "newsBlocked", "cooldownActive", "startupGuardActive", "symbolPositions", "maxPositionsPerSymbol"):
+        if key not in diag_guards:
+            missing_optional.append("mql5.guards." + key)
+    for key in ("liveMode", "tradeAllowed", "readOnlyMode"):
+        if key not in diag_permissions:
+            missing_optional.append("mql5.permissions." + key)
+
+    return {
+        "schema": "quantgod.strategy_deep_parity_matrix.v1",
+        "status": "FAIL" if hard_mismatches else "PASS",
+        "strategyJson": {
+            "strategyFamily": vector.get("strategyFamily"),
+            "direction": vector.get("direction"),
+            "entryMode": vector.get("entryMode"),
+            "entryGateExpectations": _entry_gate_expectations(entry_conditions),
+            "rsi": {
+                "period": vector_rsi.get("period"),
+                "timeframe": vector_rsi.get("timeframe"),
+                "buyBand": vector_rsi.get("buyBand"),
+                "crossbackThreshold": vector_rsi.get("crossbackThreshold"),
+            },
+            "exit": vector.get("exit") if isinstance(vector.get("exit"), dict) else {},
+            "risk": vector.get("risk") if isinstance(vector.get("risk"), dict) else {},
+        },
+        "pythonReplay": {
+            "causalInputsOnly": replay_causal.get("posteriorMayAffectTrigger") is False,
+            "posteriorMayAffectTrigger": replay_causal.get("posteriorMayAffectTrigger"),
+            "posteriorUsedForScoringOnly": replay_causal.get("posteriorUsedForScoringOnly"),
+            "hardGatesNeverRelaxed": sorted(hard_gates),
+            "ordinaryNewsBlocksLive": replay_entry_causal.get("ordinaryNewsBlocksLive"),
+            "currentSample": {
+                "allowed": sample_event.get("allowed"),
+                "hardGatePass": sample_event.get("hardGatePass"),
+                "tacticalGatePass": sample_event.get("tacticalGatePass"),
+                "hardBlockers": sample_event.get("hardBlockers"),
+                "tacticalBlockers": sample_event.get("tacticalBlockers"),
+                "posteriorUsedForTrigger": sample_event.get("posteriorUsedForTrigger"),
+            },
+        },
+        "mql5Ea": {
+            "state": diagnostics.get("state") or diagnostics.get("status"),
+            "route": {
+                "timeframe": diag_route.get("timeframe"),
+                "candidateEnabled": diag_route.get("candidateEnabled"),
+                "liveEnabled": diag_route.get("liveEnabled"),
+                "inScope": diag_route.get("inScope"),
+                "lastStatus": diag_route.get("lastStatus"),
+            },
+            "permissions": {
+                "liveMode": diag_permissions.get("liveMode"),
+                "tradeAllowed": diag_permissions.get("tradeAllowed"),
+                "readOnlyMode": diag_permissions.get("readOnlyMode"),
+            },
+            "guards": {
+                "killSwitch": diag_guards.get("killSwitch"),
+                "sessionOpen": diag_guards.get("sessionOpen"),
+                "spreadAllowed": diag_guards.get("spreadAllowed"),
+                "newsBlocked": diag_guards.get("newsBlocked"),
+                "cooldownActive": diag_guards.get("cooldownActive"),
+                "startupGuardActive": diag_guards.get("startupGuardActive"),
+                "manualPositionBlock": diag_guards.get("manualPositionBlock"),
+                "symbolPositions": diag_guards.get("symbolPositions"),
+                "maxPositionsPerSymbol": diag_guards.get("maxPositionsPerSymbol"),
+            },
+            "rsi": {
+                "period": diag_rsi.get("period"),
+                "timeframe": diag_route.get("timeframe"),
+                "oversold": diag_rsi.get("oversold"),
+                "signalReady": diag_rsi.get("signalReady"),
+                "signalDirection": diag_rsi.get("signalDirection"),
+                "evalCode": diag_rsi.get("evalCode"),
+                "evalReason": diag_rsi.get("evalReason"),
+            },
+        },
+        "missingOptionalFields": sorted(set(missing_optional)),
+        "hardMismatches": sorted(set(hard_mismatches)),
+        "reasonZh": "三方关键门禁一致；可选字段缺失只作为审计提醒。"
+        if not hard_mismatches
+        else "三方关键门禁存在硬差异，禁止晋级。",
+    }
+
+
 def _check_backtest_engine(engine: Any) -> Dict[str, Any]:
     data = engine if isinstance(engine, dict) else {}
     required_markers = {
@@ -343,6 +506,45 @@ def _parity_dimensions(backtest: Dict[str, Any], live_loop: Dict[str, Any], diag
 
 def _present(value: Any) -> bool:
     return value not in {None, ""}
+
+
+def _compare_number(name: str, left: Any, right: Any, mismatches: List[str], missing: List[str], tolerance: float) -> None:
+    if not _present(left) or not _present(right):
+        missing.append(name)
+        return
+    try:
+        left_num = float(left)
+        right_num = float(right)
+    except (TypeError, ValueError):
+        mismatches.append(name)
+        return
+    if abs(left_num - right_num) > tolerance:
+        mismatches.append(name)
+
+
+def _compare_text(name: str, left: Any, right: Any, mismatches: List[str], missing: List[str]) -> None:
+    if not _present(left) or not _present(right):
+        missing.append(name)
+        return
+    if str(left).upper() != str(right).upper():
+        mismatches.append(name)
+
+
+def _lower_set(values: Any) -> set[str]:
+    if not isinstance(values, list):
+        return set()
+    return {str(item).replace("_", "").lower() for item in values}
+
+
+def _entry_gate_expectations(entry_conditions: List[Any]) -> Dict[str, bool]:
+    text = " ".join(str(item or "") for item in entry_conditions).lower()
+    return {
+        "runtimeFresh": "runtimefresh" in text,
+        "fastlanePass": "fastlane" in text,
+        "spreadSafe": "spread" in text,
+        "newsNotHard": "news" in text,
+        "rsiCrossback": "rsi.crossback" in text or "crossback" in text,
+    }
 
 
 def _reason_zh(status: str) -> str:

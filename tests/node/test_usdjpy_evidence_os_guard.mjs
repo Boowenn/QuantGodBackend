@@ -39,6 +39,10 @@ test('evidence OS remains read-only and feeds GA scoring', () => {
   ].join('\n');
 
   assert.match(source, /STRATEGY_JSON_PYTHON_REPLAY_MQL5_EA_PARITY/);
+  assert.match(source, /strategy_json_python_replay_mql5_gate_matrix/);
+  assert.match(source, /quantgod\.strategy_deep_parity_matrix\.v1/);
+  assert.match(source, /posteriorMayAffectTrigger/);
+  assert.match(source, /ordinaryNewsBlocksLive/);
   assert.match(source, /QuantGod_LiveExecutionFeedback\.jsonl/);
   assert.match(source, /QuantGod_CaseMemory\.jsonl/);
   assert.match(source, /promotionGate/);
