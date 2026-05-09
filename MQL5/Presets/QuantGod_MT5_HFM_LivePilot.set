@@ -133,3 +133,5 @@ EnableUsdJpyKlineExporter=true
 UsdJpyKlineExportIntervalMinutes=60
 UsdJpyKlineExportMonths=12
 UsdJpyKlineExportMaxBarsPerTimeframe=700000
+EnableStrategyJsonEAContractAdapter=true
+StrategyJsonEAContractFile=QuantGod_StrategyJsonEAContract_EA.txt

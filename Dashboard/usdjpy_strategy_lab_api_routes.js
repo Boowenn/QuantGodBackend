@@ -639,6 +639,30 @@ async function handle(req, res, ctx) {
     sendJson(res, payload && payload.ok === false ? 500 : 200, payload);
     return;
   }
+  if (
+    req.method === 'GET' &&
+    (pathname === '/api/usdjpy-strategy-lab/strategy-contract' ||
+      pathname === '/api/usdjpy-strategy-lab/strategy-contract/status')
+  ) {
+    const args = ['--runtime-dir', runtimeDir, 'status'];
+    if (url.searchParams.get('write') === '1') args.push('--write');
+    const payload = await runPythonJson(ctx.repoRoot, args, 45000, 'run_strategy_contract_adapter.py');
+    sendJson(res, payload && payload.ok === false ? 500 : 200, payload);
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/api/usdjpy-strategy-lab/strategy-contract/build') {
+    const payload = await runPythonJson(ctx.repoRoot, ['--runtime-dir', runtimeDir, 'build'], 45000, 'run_strategy_contract_adapter.py');
+    sendJson(res, payload && payload.ok === false ? 500 : 200, payload);
+    return;
+  }
+  if (req.method === 'GET' && pathname === '/api/usdjpy-strategy-lab/strategy-contract/telegram-text') {
+    const args = ['--runtime-dir', runtimeDir, 'telegram-text'];
+    if (url.searchParams.get('refresh') === '1') args.push('--refresh');
+    if (url.searchParams.get('send') === '1') args.push('--send');
+    const payload = await runPythonJson(ctx.repoRoot, args, 45000, 'run_strategy_contract_adapter.py');
+    sendJson(res, payload && payload.ok === false ? 500 : 200, payload);
+    return;
+  }
   if (req.method === 'POST' && pathname === '/api/usdjpy-strategy-lab/run') {
     const payload = await runPythonJson(ctx.repoRoot, [...baseArgs, 'build', '--write']);
     sendJson(res, payload && payload.ok === false ? 500 : 200, payload);
