@@ -31,6 +31,8 @@ test('Strategy JSON contract backend writes only shadow/tester/paper adapter fil
     'SHADOW_EVALUATION_ONLY',
     'QuantGod_StrategyJsonEAContract_EA.txt',
     'QuantGod_StrategyJsonEAContractEAStatus.json',
+    'QuantGod_StrategyJsonEAShadowEvaluationStatus.json',
+    'QuantGod_StrategyJsonEAShadowEvaluationLedger.jsonl',
     'orderSendAllowed": False',
     'livePresetMutationAllowed": False',
     'gaDirectLiveAllowed": False',
@@ -52,6 +54,10 @@ test('MQL5 adapter is read-only and cannot affect live execution', () => {
     'EnableStrategyJsonEAContractAdapter',
     'StrategyJsonEAContractFile',
     'QuantGod_StrategyJsonEAContractEAStatus.json',
+    'QuantGod_StrategyJsonEAShadowEvaluationStatus.json',
+    'QuantGod_StrategyJsonEAShadowEvaluationLedger.jsonl',
+    'SHADOW_WOULD_ENTER',
+    'shadowEvaluationOnly',
     'SHADOW_CONTRACT_READY',
     'orderSendAllowed',
     'livePresetMutationAllowed',
@@ -77,6 +83,8 @@ test('Frontend shows Strategy JSON to EA contract status without direct file rea
     'Strategy JSON → EA 契约',
     '只读评估',
     'EA 回执',
+    'EA 影子评估',
+    'eaShadowEvaluationRecent',
     'strategyContractPayload',
   ]) {
     assert.match(panel, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -26,9 +27,23 @@ from .schema import (
     CONTRACT_SCHEMA,
     CONTRACT_STATUS_FILE,
     EA_STATUS_FILE,
+    EA_SHADOW_EVALUATION_LEDGER_FILE,
+    EA_SHADOW_EVALUATION_STATUS_FILE,
     SAFETY_BOUNDARY,
     contract_dir,
     utc_now_iso,
+)
+
+MT5_FILES_ENV_KEYS = (
+    "QG_MT5_FILES_DIR",
+    "QG_MT5_FILES",
+    "QG_HFM_FILES_DIR",
+    "QG_HFM_FILES",
+)
+
+DEFAULT_MT5_FILES_PATH = (
+    Path.home()
+    / "Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Files"
 )
 
 
@@ -61,6 +76,28 @@ def _read_jsonl(path: Path, limit: int = 512) -> List[Dict[str, Any]]:
         if isinstance(item, dict):
             rows.append(item)
     return rows
+
+
+def _candidate_runtime_dirs(runtime_dir: Path) -> List[Path]:
+    candidates: List[Path] = [runtime_dir, contract_dir(runtime_dir)]
+    for key in MT5_FILES_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            candidates.append(Path(value).expanduser())
+    candidates.append(DEFAULT_MT5_FILES_PATH)
+    seen: set[str] = set()
+    dirs: List[Path] = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        key = str(resolved)
+        if key in seen or not resolved.exists() or not resolved.is_dir():
+            continue
+        seen.add(key)
+        dirs.append(resolved)
+    return dirs
 
 
 def _safe_str(value: Any, fallback: str = "") -> str:
@@ -216,9 +253,45 @@ def _build_ea_text(contract: Dict[str, Any]) -> str:
 
 
 def _read_ea_status(runtime_dir: Path) -> Dict[str, Any]:
-    root_status = _load_json(runtime_dir / EA_STATUS_FILE)
-    contract_status = _load_json(contract_dir(runtime_dir) / EA_STATUS_FILE)
-    return root_status or contract_status
+    for directory in _candidate_runtime_dirs(runtime_dir):
+        payload = _load_json(directory / EA_STATUS_FILE)
+        if payload:
+            return {**payload, "sourcePath": str(directory / EA_STATUS_FILE)}
+    return {}
+
+
+def _read_shadow_evaluation_status(runtime_dir: Path) -> Dict[str, Any]:
+    primary_paths = [
+        runtime_dir / EA_SHADOW_EVALUATION_STATUS_FILE,
+        contract_dir(runtime_dir) / EA_SHADOW_EVALUATION_STATUS_FILE,
+    ]
+    for path in primary_paths:
+        payload = _load_json(path)
+        if payload:
+            return {**payload, "sourcePath": str(path)}
+    for directory in _candidate_runtime_dirs(runtime_dir):
+        payload = _load_json(directory / EA_SHADOW_EVALUATION_STATUS_FILE)
+        if payload:
+            return {**payload, "sourcePath": str(directory / EA_SHADOW_EVALUATION_STATUS_FILE)}
+    return {}
+
+
+def _read_shadow_evaluation_ledger(runtime_dir: Path, limit: int = 20) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    primary_dirs = [runtime_dir, contract_dir(runtime_dir)]
+    for directory in primary_dirs:
+        path = directory / EA_SHADOW_EVALUATION_LEDGER_FILE
+        for row in _read_jsonl(path, limit=limit):
+            rows.append({**row, "sourcePath": str(path)})
+    if rows:
+        rows.sort(key=lambda item: str(item.get("generatedAtServer") or item.get("generatedAtLocal") or ""))
+        return rows[-limit:]
+    for directory in _candidate_runtime_dirs(runtime_dir):
+        path = directory / EA_SHADOW_EVALUATION_LEDGER_FILE
+        for row in _read_jsonl(path, limit=limit):
+            rows.append({**row, "sourcePath": str(path)})
+    rows.sort(key=lambda item: str(item.get("generatedAtServer") or item.get("generatedAtLocal") or ""))
+    return rows[-limit:]
 
 
 def build_strategy_contract(runtime_dir: Path, write: bool = True) -> Dict[str, Any]:
@@ -260,6 +333,8 @@ def build_strategy_contract(runtime_dir: Path, write: bool = True) -> Dict[str, 
         "status": "CONTRACT_WRITTEN" if write else "CONTRACT_PREVIEW",
         "contract": contract,
         "eaStatus": _read_ea_status(runtime_dir),
+        "eaShadowEvaluation": _read_shadow_evaluation_status(runtime_dir),
+        "eaShadowEvaluationRecent": _read_shadow_evaluation_ledger(runtime_dir, limit=20),
         "safety": dict(SAFETY_BOUNDARY),
     }
     if write:
@@ -277,6 +352,8 @@ def read_strategy_contract_status(runtime_dir: Path) -> Dict[str, Any]:
     status = _load_json(runtime_dir / CONTRACT_STATUS_FILE) or _load_json(contract_dir(runtime_dir) / CONTRACT_STATUS_FILE)
     contract = _load_json(runtime_dir / CONTRACT_JSON_FILE) or _load_json(contract_dir(runtime_dir) / CONTRACT_JSON_FILE)
     ea_status = _read_ea_status(runtime_dir)
+    shadow_evaluation = _read_shadow_evaluation_status(runtime_dir)
+    shadow_evaluation_recent = _read_shadow_evaluation_ledger(runtime_dir, limit=20)
     if not status:
         return {
             "ok": True,
@@ -286,12 +363,16 @@ def read_strategy_contract_status(runtime_dir: Path) -> Dict[str, Any]:
             "status": "WAITING_CONTRACT_BUILD",
             "contract": contract,
             "eaStatus": ea_status,
+            "eaShadowEvaluation": shadow_evaluation,
+            "eaShadowEvaluationRecent": shadow_evaluation_recent,
             "reasonZh": "等待 Agent 生成 Strategy JSON → EA 只读评估契约。",
             "safety": dict(SAFETY_BOUNDARY),
         }
     status = dict(status)
     status["contract"] = status.get("contract") or contract
     status["eaStatus"] = ea_status
+    status["eaShadowEvaluation"] = shadow_evaluation
+    status["eaShadowEvaluationRecent"] = shadow_evaluation_recent
     status["safety"] = dict(SAFETY_BOUNDARY)
     if ea_status:
         status["eaAck"] = {

@@ -9,7 +9,12 @@ from .schema import AGENT_VERSION, FOCUS_SYMBOL, SAFETY_BOUNDARY, case_memory_pa
 
 
 def build_case_memory(runtime_dir: Path, write: bool = True) -> Dict[str, Any]:
-    cases = _cases_from_replay(runtime_dir) + _cases_from_execution(runtime_dir) + _cases_from_ga(runtime_dir)
+    cases = (
+        _cases_from_replay(runtime_dir)
+        + _cases_from_execution(runtime_dir)
+        + _cases_from_strategy_contract_shadow(runtime_dir)
+        + _cases_from_ga(runtime_dir)
+    )
     ga_seed_hints = _ga_seed_hints(cases)
     summary = {
         "ok": True,
@@ -100,6 +105,89 @@ def _cases_from_execution(runtime_dir: Path) -> List[Dict[str, Any]]:
         if str(row.get("strategyId") or "RSI_Reversal") != "RSI_Reversal":
             cases.append(_case("POLICY_MISMATCH", "执行反馈出现非 RSI_Reversal 策略，需要确认实盘路线仍被锁定", row, "verify_live_lane_strategy_lock", priority="HIGH"))
             break
+    return cases
+
+
+def _cases_from_strategy_contract_shadow(runtime_dir: Path) -> List[Dict[str, Any]]:
+    from .io_utils import candidate_mt5_files_dirs, read_jsonl_tail
+
+    rows: List[Dict[str, Any]] = []
+    for directory in candidate_mt5_files_dirs(runtime_dir):
+        rows.extend(read_jsonl_tail(directory / "QuantGod_StrategyJsonEAShadowEvaluationLedger.jsonl", 200))
+    status = load_json(runtime_dir / "QuantGod_StrategyJsonEAShadowEvaluationStatus.json")
+    if status:
+        rows.append(status)
+    cases: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows[-100:]:
+        if not isinstance(row, dict):
+            continue
+        status_value = str(row.get("status") or "")
+        blocker = str(row.get("blocker") or "")
+        selected_seed_id = str(row.get("selectedSeedId") or "")
+        dedupe_key = "|".join(
+            [
+                selected_seed_id,
+                str(row.get("fingerprint") or ""),
+                str(row.get("strategyFamily") or ""),
+                str(row.get("direction") or ""),
+                status_value,
+                blocker,
+            ]
+        )
+        if dedupe_key and dedupe_key in seen:
+            continue
+        if dedupe_key:
+            seen.add(dedupe_key)
+        evidence = {
+            "selectedSeedId": selected_seed_id,
+            "fingerprint": row.get("fingerprint"),
+            "strategyId": row.get("strategyId"),
+            "strategyFamily": row.get("strategyFamily"),
+            "direction": row.get("direction"),
+            "lane": row.get("lane"),
+            "status": status_value,
+            "blocker": blocker,
+            "wouldEnter": bool(row.get("wouldEnter")),
+            "hardGuardsPass": bool(row.get("hardGuardsPass")),
+            "rsiClosed1": row.get("rsiClosed1"),
+            "rsiClosed2": row.get("rsiClosed2"),
+            "spreadPips": row.get("spreadPips"),
+            "source": "STRATEGY_JSON_EA_SHADOW_EVALUATION",
+        }
+        if status_value == "SHADOW_WOULD_ENTER":
+            cases.append(
+                _case(
+                    "STRATEGY_CONTRACT_SHADOW_SIGNAL",
+                    "EA 已按 Strategy JSON contract 看到 shadow 入场机会；下一代 GA 应优先复核该 seed 的回测、parity 与 tester 结果。",
+                    evidence,
+                    "promote_contract_candidate_to_tester",
+                    priority="MEDIUM",
+                    recommended_lane="MT5_SHADOW",
+                )
+            )
+        elif blocker in {"EA_CONTRACT_FAMILY_NOT_IMPLEMENTED", "EA_CONTRACT_DIRECTION_NOT_LIVE_ROUTE"}:
+            cases.append(
+                _case(
+                    "STRATEGY_CONTRACT_EA_ADAPTER_GAP",
+                    row.get("reasonZh") or "EA 已读取 Strategy JSON contract，但当前策略族/方向尚未具备 EA shadow evaluation 适配。",
+                    evidence,
+                    "add_ea_contract_adapter_family",
+                    priority="MEDIUM",
+                    recommended_lane="MT5_SHADOW",
+                )
+            )
+        elif blocker in {"CONTRACT_SAFETY_REJECTED", "NON_USDJPY_CONTRACT", "CONTRACT_MODE_REJECTED"}:
+            cases.append(
+                _case(
+                    "STRATEGY_CONTRACT_SAFETY_REJECTED",
+                    row.get("reasonZh") or "EA 拒绝了不安全或不在范围内的 Strategy JSON contract。",
+                    evidence,
+                    "repair_strategy_json_contract_safety",
+                    priority="HIGH",
+                    recommended_lane="MT5_SHADOW",
+                )
+            )
     return cases
 
 
@@ -196,9 +284,17 @@ def _default_priority(case_type: str) -> str:
         "EXECUTION_SLIPPAGE",
         "EXECUTION_LATENCY",
         "EXECUTION_FEEDBACK_SCHEMA_GAP",
+        "STRATEGY_CONTRACT_SAFETY_REJECTED",
     }:
         return "HIGH"
-    if case_type in {"MISSED_BIG_MOVE", "EARLY_EXIT", "BAD_ENTRY", "GA_OVERFIT"}:
+    if case_type in {
+        "MISSED_BIG_MOVE",
+        "EARLY_EXIT",
+        "BAD_ENTRY",
+        "GA_OVERFIT",
+        "STRATEGY_CONTRACT_SHADOW_SIGNAL",
+        "STRATEGY_CONTRACT_EA_ADAPTER_GAP",
+    }:
         return "MEDIUM"
     return "LOW"
 

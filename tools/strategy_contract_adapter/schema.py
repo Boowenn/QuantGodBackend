@@ -11,6 +11,8 @@ CONTRACT_JSON_FILE = "QuantGod_StrategyJsonEAContract.json"
 CONTRACT_EA_FILE = "QuantGod_StrategyJsonEAContract_EA.txt"
 CONTRACT_STATUS_FILE = "QuantGod_StrategyJsonEAContractStatus.json"
 EA_STATUS_FILE = "QuantGod_StrategyJsonEAContractEAStatus.json"
+EA_SHADOW_EVALUATION_STATUS_FILE = "QuantGod_StrategyJsonEAShadowEvaluationStatus.json"
+EA_SHADOW_EVALUATION_LEDGER_FILE = "QuantGod_StrategyJsonEAShadowEvaluationLedger.jsonl"
 
 CONTRACT_MODE = "SHADOW_EVALUATION_ONLY"
 ALLOWED_CONTRACT_MODES = {
@@ -41,4 +43,3 @@ def utc_now_iso() -> str:
 
 def contract_dir(runtime_dir: Path) -> Path:
     return runtime_dir / CONTRACT_DIR
-

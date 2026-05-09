@@ -147,6 +147,7 @@ input int    UsdJpyKlineExportMonths    = 12;
 input int    UsdJpyKlineExportMaxBarsPerTimeframe = 700000;
 input bool   EnableStrategyJsonEAContractAdapter = true;
 input string StrategyJsonEAContractFile = "QuantGod_StrategyJsonEAContract_EA.txt";
+input int    StrategyJsonEAContractShadowEvalEverySeconds = 60;
 
 string g_symbols[];
 string g_focusSymbol = "";
@@ -5548,6 +5549,29 @@ string StrategyJsonEAContractStatusFileName()
    return "QuantGod_StrategyJsonEAContractEAStatus.json";
 }
 
+string StrategyJsonEAShadowEvaluationStatusFileName()
+{
+   return "QuantGod_StrategyJsonEAShadowEvaluationStatus.json";
+}
+
+string StrategyJsonEAShadowEvaluationLedgerFileName()
+{
+   return "QuantGod_StrategyJsonEAShadowEvaluationLedger.jsonl";
+}
+
+ENUM_TIMEFRAMES StrategyJsonContractTimeframe(string label, ENUM_TIMEFRAMES fallback)
+{
+   string value = ToUpperString(label);
+   if(value == "M1") return PERIOD_M1;
+   if(value == "M5") return PERIOD_M5;
+   if(value == "M15") return PERIOD_M15;
+   if(value == "M30") return PERIOD_M30;
+   if(value == "H1") return PERIOD_H1;
+   if(value == "H4") return PERIOD_H4;
+   if(value == "D1") return PERIOD_D1;
+   return fallback;
+}
+
 string BuildStrategyJsonEAContractStatusJson()
 {
    string content = "";
@@ -5669,6 +5693,216 @@ string BuildStrategyJsonEAContractStatusJson()
    json += "\"eaOwnsLiveExecution\":true";
    json += "}";
    return json;
+}
+
+string BuildStrategyJsonEAShadowEvaluationJson()
+{
+   string content = "";
+   bool loaded = false;
+   string status = "WAITING_CONTRACT";
+   string blocker = "WAITING_CONTRACT";
+   string reason = "等待 EA 读取 Strategy JSON 只读契约后生成 shadow evaluation。";
+   string selectedSeedId = "";
+   string fingerprint = "";
+   string contractMode = "";
+   string focusSymbol = "";
+   string strategyId = "";
+   string strategyFamily = "";
+   string direction = "";
+   string lane = "";
+   string entryMode = "";
+   string rsiTimeframeLabel = "";
+   int rsiPeriod = 0;
+   double rsiBuyBand = 0.0;
+   double rsiCrossbackThreshold = 0.0;
+   bool orderSendAllowed = false;
+   bool livePresetMutationAllowed = false;
+   bool gaDirectLiveAllowed = false;
+   bool wouldAffectLive = false;
+
+   if(!EnableStrategyJsonEAContractAdapter)
+   {
+      status = "DISABLED";
+      blocker = "ADAPTER_DISABLED";
+      reason = "EA Strategy JSON 只读 adapter 已关闭，无法生成 shadow evaluation。";
+   }
+   else
+   {
+      content = StrategyJsonContractReadAll(StrategyJsonEAContractFile);
+      if(StringLen(content) > 0)
+      {
+         loaded = true;
+         selectedSeedId = StrategyJsonContractValue(content, "selectedSeedId", "");
+         fingerprint = StrategyJsonContractValue(content, "fingerprint", "");
+         contractMode = StrategyJsonContractValue(content, "contractMode", "");
+         focusSymbol = StrategyJsonContractValue(content, "focusSymbol", "");
+         strategyId = StrategyJsonContractValue(content, "strategyId", "");
+         strategyFamily = StrategyJsonContractValue(content, "strategyFamily", "");
+         direction = StrategyJsonContractValue(content, "direction", "");
+         lane = StrategyJsonContractValue(content, "lane", "");
+         entryMode = StrategyJsonContractValue(content, "entryMode", "");
+         rsiPeriod = StrategyJsonContractInt(content, "rsiPeriod", PilotRsiPeriod);
+         rsiTimeframeLabel = StrategyJsonContractValue(content, "rsiTimeframe", TimeframeLabel(PilotRsiTimeframe));
+         rsiBuyBand = StrategyJsonContractDouble(content, "rsiBuyBand", PilotRsiOversold);
+         rsiCrossbackThreshold = StrategyJsonContractDouble(content, "rsiCrossbackThreshold", PilotRsiCrossbackThreshold);
+         orderSendAllowed = StrategyJsonContractBool(content, "orderSendAllowed", false);
+         livePresetMutationAllowed = StrategyJsonContractBool(content, "livePresetMutationAllowed", false);
+         gaDirectLiveAllowed = StrategyJsonContractBool(content, "gaDirectLiveAllowed", false);
+         wouldAffectLive = StrategyJsonContractBool(content, "wouldAffectLive", false);
+      }
+   }
+
+   string symbol = g_focusSymbol;
+   if(StringLen(focusSymbol) > 0)
+      symbol = focusSymbol;
+   if(StringLen(symbol) <= 0)
+      symbol = "USDJPYc";
+
+   MqlTick tick;
+   ZeroMemory(tick);
+   bool tickOk = SymbolInfoTick(symbol, tick);
+   double bid = tickOk ? tick.bid : 0.0;
+   double ask = tickOk ? tick.ask : 0.0;
+   double spreadPips = tickOk ? CalcSpreadPips(symbol, bid, ask) : 0.0;
+   bool spreadAllowed = (tickOk && spreadPips <= PilotMaxSpreadPips);
+   bool sessionOpen = IsPilotSessionOpen();
+   string newsReason = "";
+   bool newsBlocked = PilotNewsBlocksSymbol(symbol, newsReason);
+
+   ENUM_TIMEFRAMES rsiTimeframe = StrategyJsonContractTimeframe(rsiTimeframeLabel, PilotRsiTimeframe);
+   int effectiveRsiPeriod = rsiPeriod > 0 ? rsiPeriod : PilotRsiPeriod;
+   double effectiveBuyBand = rsiBuyBand > 0.0 ? rsiBuyBand : PilotRsiOversold;
+   double effectiveThreshold = MathMax(0.0, rsiCrossbackThreshold);
+   double rsi1 = RSIValue(symbol, rsiTimeframe, effectiveRsiPeriod, 1);
+   double rsi2 = RSIValue(symbol, rsiTimeframe, effectiveRsiPeriod, 2);
+   bool indicatorReady = (rsi1 > 0.0 && rsi2 > 0.0);
+   bool rsiLongSignal = (indicatorReady && (rsi1 <= effectiveBuyBand || (rsi2 < effectiveBuyBand && rsi1 > effectiveBuyBand + effectiveThreshold)));
+   bool hardGuardsPass = (tickOk && spreadAllowed && sessionOpen && !newsBlocked);
+   bool wouldEnter = false;
+
+   if(loaded)
+   {
+      if(orderSendAllowed || livePresetMutationAllowed || gaDirectLiveAllowed || wouldAffectLive)
+      {
+         status = "SAFETY_REJECTED";
+         blocker = "CONTRACT_SAFETY_REJECTED";
+         reason = "Strategy JSON contract 试图打开执行或 preset 权限，EA shadow evaluation 已拒绝。";
+      }
+      else if(focusSymbol != "USDJPYc")
+      {
+         status = "SYMBOL_REJECTED";
+         blocker = "NON_USDJPY_CONTRACT";
+         reason = "Strategy JSON contract 不是 USDJPYc，EA shadow evaluation 已拒绝。";
+      }
+      else if(!StrategyJsonContractModeAllowed(contractMode))
+      {
+         status = "MODE_REJECTED";
+         blocker = "CONTRACT_MODE_REJECTED";
+         reason = "Strategy JSON contract 不是 shadow/tester/paper 只读评估模式。";
+      }
+      else if(strategyFamily != "RSI_Reversal")
+      {
+         status = "UNSUPPORTED_STRATEGY_FAMILY_SHADOW_OBSERVE";
+         blocker = "EA_CONTRACT_FAMILY_NOT_IMPLEMENTED";
+         reason = "EA 当前只对 RSI_Reversal Strategy JSON contract 做逐 bar shadow evaluation；其他策略先进入 Case Memory/GA 待适配。";
+      }
+      else if(direction != "LONG")
+      {
+         status = "DIRECTION_SHADOW_ONLY_DEMOTED";
+         blocker = "EA_CONTRACT_DIRECTION_NOT_LIVE_ROUTE";
+         reason = "EA 已读取 Strategy JSON contract，但实盘首路线只允许 RSI_Reversal LONG；该方向只做 shadow 记录。";
+      }
+      else if(!indicatorReady)
+      {
+         status = "SHADOW_WAIT_INDICATORS";
+         blocker = "INDICATORS_NOT_READY";
+         reason = "EA 已读取 Strategy JSON contract，等待 RSI 指标稳定后继续 shadow evaluation。";
+      }
+      else if(!hardGuardsPass)
+      {
+         status = "SHADOW_GUARD_BLOCKED";
+         if(!tickOk)
+            blocker = "TICK_MISSING";
+         else if(!spreadAllowed)
+            blocker = "SPREAD_BLOCK";
+         else if(!sessionOpen)
+            blocker = "SESSION_CLOSED";
+         else if(newsBlocked)
+            blocker = "NEWS_HARD_BLOCK";
+         reason = "Strategy JSON shadow evaluation 只记录机会；runtime/session/spread/news 硬守门未通过，不会进入实盘。";
+      }
+      else if(rsiLongSignal)
+      {
+         status = "SHADOW_WOULD_ENTER";
+         blocker = "NONE";
+         reason = "EA 按 Strategy JSON contract 看到 RSI LONG shadow 机会；仅写入 shadow ledger，供 Case Memory/GA 使用。";
+         wouldEnter = true;
+      }
+      else
+      {
+         status = "SHADOW_OBSERVE";
+         blocker = "RSI_CONTRACT_SIGNAL_NOT_READY";
+         reason = "EA 已读取 Strategy JSON contract；当前 RSI LONG 条件未触发，继续 shadow 观察。";
+      }
+   }
+
+   string evaluationId = selectedSeedId + "-" + fingerprint + "-" + IntegerToString((int)TimeLocal());
+   string json = "{";
+   json += "\"schema\":\"quantgod.strategy_json_ea_shadow_evaluation.v1\",";
+   json += "\"evaluationId\":\"" + JsonEscape(evaluationId) + "\",";
+   json += "\"generatedAtLocal\":\"" + JsonEscape(FormatDateTime(TimeLocal(), true)) + "\",";
+   json += "\"generatedAtServer\":\"" + JsonEscape(FormatDateTime(CurrentServerTime(), true)) + "\",";
+   json += "\"enabled\":" + JsonBool(EnableStrategyJsonEAContractAdapter) + ",";
+   json += "\"loaded\":" + JsonBool(loaded) + ",";
+   json += "\"status\":\"" + JsonEscape(status) + "\",";
+   json += "\"blocker\":\"" + JsonEscape(blocker) + "\",";
+   json += "\"reasonZh\":\"" + JsonEscape(reason) + "\",";
+   json += "\"contractFile\":\"" + JsonEscape(StrategyJsonEAContractFile) + "\",";
+   json += "\"selectedSeedId\":\"" + JsonEscape(selectedSeedId) + "\",";
+   json += "\"fingerprint\":\"" + JsonEscape(fingerprint) + "\",";
+   json += "\"contractMode\":\"" + JsonEscape(contractMode) + "\",";
+   json += "\"strategyId\":\"" + JsonEscape(strategyId) + "\",";
+   json += "\"strategyFamily\":\"" + JsonEscape(strategyFamily) + "\",";
+   json += "\"direction\":\"" + JsonEscape(direction) + "\",";
+   json += "\"lane\":\"" + JsonEscape(lane) + "\",";
+   json += "\"entryMode\":\"" + JsonEscape(entryMode) + "\",";
+   json += "\"symbol\":\"" + JsonEscape(symbol) + "\",";
+   json += "\"timeframe\":\"" + JsonEscape(TimeframeLabel(rsiTimeframe)) + "\",";
+   json += "\"rsiPeriod\":" + IntegerToString(effectiveRsiPeriod) + ",";
+   json += "\"rsiClosed1\":" + FormatNumber(rsi1, 4) + ",";
+   json += "\"rsiClosed2\":" + FormatNumber(rsi2, 4) + ",";
+   json += "\"rsiBuyBand\":" + FormatNumber(effectiveBuyBand, 4) + ",";
+   json += "\"rsiCrossbackThreshold\":" + FormatNumber(effectiveThreshold, 4) + ",";
+   json += "\"indicatorReady\":" + JsonBool(indicatorReady) + ",";
+   json += "\"rsiLongSignal\":" + JsonBool(rsiLongSignal) + ",";
+   json += "\"wouldEnter\":" + JsonBool(wouldEnter) + ",";
+   json += "\"hardGuardsPass\":" + JsonBool(hardGuardsPass) + ",";
+   json += "\"sessionOpen\":" + JsonBool(sessionOpen) + ",";
+   json += "\"spreadAllowed\":" + JsonBool(spreadAllowed) + ",";
+   json += "\"spreadPips\":" + FormatNumber(spreadPips, 2) + ",";
+   json += "\"maxSpreadPips\":" + FormatNumber(PilotMaxSpreadPips, 2) + ",";
+   json += "\"newsBlocked\":" + JsonBool(newsBlocked) + ",";
+   json += "\"newsReason\":\"" + JsonEscape(newsReason) + "\",";
+   json += "\"bid\":" + FormatNumber(bid, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)) + ",";
+   json += "\"ask\":" + FormatNumber(ask, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS)) + ",";
+   json += "\"shadowEvaluationOnly\":true,";
+   json += "\"orderSendAllowed\":false,";
+   json += "\"livePresetMutationAllowed\":false,";
+   json += "\"gaDirectLiveAllowed\":false";
+   json += "}";
+   return json;
+}
+
+void WriteStrategyJsonEAShadowEvaluationFiles(string evaluationJson)
+{
+   static datetime lastWrite = 0;
+   datetime now = TimeLocal();
+   WriteTextFile(StrategyJsonEAShadowEvaluationStatusFileName(), evaluationJson);
+   int intervalSeconds = MathMax(5, StrategyJsonEAContractShadowEvalEverySeconds);
+   if(lastWrite > 0 && (now - lastWrite) < intervalSeconds)
+      return;
+   AppendTextFile(StrategyJsonEAShadowEvaluationLedgerFileName(), evaluationJson + "\r\n");
+   lastWrite = now;
 }
 // Strategy JSON EA Contract Adapter END
 
@@ -7579,6 +7813,7 @@ void ExportDashboard(bool runExecutionLoop)
 
    string usdJpyRsiEntryDiagnosticsJson = BuildUsdJpyRsiEntryDiagnosticsJson();
    string strategyJsonEAContractStatusJson = BuildStrategyJsonEAContractStatusJson();
+   string strategyJsonEAShadowEvaluationJson = BuildStrategyJsonEAShadowEvaluationJson();
 
    string json = "{\r\n";
    json += "  \"timestamp\": \"" + FormatDateTime(TimeLocal(), true) + "\",\r\n";
@@ -7685,6 +7920,7 @@ void ExportDashboard(bool runExecutionLoop)
    json += "  \"diagnostics\": " + BuildDiagnosticsJson() + ",\r\n";
    json += "  \"usdJpyRsiEntryDiagnostics\": " + usdJpyRsiEntryDiagnosticsJson + ",\r\n";
    json += "  \"strategyJsonEaContract\": " + strategyJsonEAContractStatusJson + ",\r\n";
+   json += "  \"strategyJsonEaShadowEvaluation\": " + strategyJsonEAShadowEvaluationJson + ",\r\n";
    json += "  \"market\": {\r\n";
    json += "    \"symbol\": \"" + JsonEscape(g_focusSymbol) + "\",\r\n";
    json += "    \"bid\": " + FormatNumber(focusBid, (int)SymbolInfoInteger(g_focusSymbol, SYMBOL_DIGITS)) + ",\r\n";
@@ -7753,6 +7989,7 @@ void ExportDashboard(bool runExecutionLoop)
    WriteTextFile("QuantGod_MT5_ShadowStatus.txt", statusFile);
    WriteTextFile("QuantGod_USDJPYRsiEntryDiagnostics.json", usdJpyRsiEntryDiagnosticsJson);
    WriteTextFile(StrategyJsonEAContractStatusFileName(), strategyJsonEAContractStatusJson);
+   WriteStrategyJsonEAShadowEvaluationFiles(strategyJsonEAShadowEvaluationJson);
    WriteTextFile("QuantGod_Dashboard.json", json);
    ExportShadowCsvs(snapshots, journal, closedTrades);
    UpdateShadowChartComment(tradeStatus, connected, accountLogin);

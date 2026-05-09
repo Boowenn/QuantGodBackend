@@ -104,5 +104,11 @@ def _apply_case_hint(seed: Dict[str, Any], hint: str) -> None:
     elif hint in {"inspect_execution_quality", "reduce_execution_latency", "verify_execution_ack_fill_sync", "verify_ea_policy_sync"}:
         risk["opportunityLotMultiplier"] = min(0.25, float(risk.get("opportunityLotMultiplier", 0.35)))
         seed.setdefault("entry", {}).setdefault("conditions", []).append("executionQuality != DEGRADED")
+    elif hint == "promote_contract_candidate_to_tester":
+        rsi["buyBand"] = min(37, float(rsi.get("buyBand", 34)) + 0.5)
+        seed.setdefault("entry", {}).setdefault("conditions", []).append("strategyContractShadowSignal == true")
+    elif hint in {"add_ea_contract_adapter_family", "repair_strategy_json_contract_safety"}:
+        risk["opportunityLotMultiplier"] = min(0.20, float(risk.get("opportunityLotMultiplier", 0.35)))
+        seed.setdefault("entry", {}).setdefault("conditions", []).append("strategyContractAdapterReady == true")
     risk["stage"] = "SHADOW"
     risk["maxLot"] = min(2.0, float(risk.get("maxLot", 2.0)))
