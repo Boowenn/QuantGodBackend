@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from usdjpy_evidence_os.telegram_gateway import dispatch_text
-from usdjpy_strategy_backtest.history_sync import sync_historical_klines
+from usdjpy_strategy_backtest.history_sync import build_history_production_status, sync_historical_klines
 from usdjpy_strategy_backtest.quality import build_quality_report, write_quality_report
 from usdjpy_strategy_backtest.report import build_sample, run_backtest, status
 from usdjpy_strategy_backtest.telegram_text import backtest_to_chinese_text
@@ -66,10 +66,15 @@ def main(argv: list[str] | None = None) -> int:
     sync.add_argument("--terminal-path", default=os.environ.get("QG_MT5_TERMINAL_PATH", ""))
     sync.add_argument("--full-refresh", action="store_true")
     sync.add_argument("--max-bars-per-timeframe", type=int, default=int(os.environ.get("QG_USDJPY_HISTORY_MAX_BARS", "700000")))
+    sync.add_argument("--max-latest-lag-hours", type=float, default=float(os.environ.get("QG_USDJPY_HISTORY_MAX_LAG_HOURS", "96")))
     run = sub.add_parser("run")
     run.add_argument("--write", action="store_true")
     sub.add_parser("status")
     sub.add_parser("quality")
+    prod = sub.add_parser("production-status")
+    prod.add_argument("--lookback-days", type=int, default=int(os.environ["QG_USDJPY_HISTORY_LOOKBACK_DAYS"]) if os.environ.get("QG_USDJPY_HISTORY_LOOKBACK_DAYS") else None)
+    prod.add_argument("--months", type=int, default=int(os.environ.get("QG_USDJPY_HISTORY_MONTHS", "12")))
+    prod.add_argument("--max-latest-lag-hours", type=float, default=float(os.environ.get("QG_USDJPY_HISTORY_MAX_LAG_HOURS", "96")))
     text = sub.add_parser("telegram-text")
     text.add_argument("--refresh", action="store_true")
     text.add_argument("--send", action="store_true")
@@ -89,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
                 terminal_path=args.terminal_path,
                 full_refresh=args.full_refresh,
                 max_bars_per_timeframe=args.max_bars_per_timeframe,
+                max_latest_lag_hours=args.max_latest_lag_hours,
             )
         )
     if args.command == "run":
@@ -99,6 +105,15 @@ def main(argv: list[str] | None = None) -> int:
         current = status(runtime_dir)
         payload = build_quality_report(current, current.get("latestReport", {}))
         write_quality_report(runtime_dir, payload)
+        return emit(payload)
+    if args.command == "production-status":
+        target_days = int(args.lookback_days or max(180, int(args.months) * 31))
+        payload = build_history_production_status(
+            runtime_dir,
+            sync_report=status(runtime_dir).get("historySyncReport", {}),
+            target_days=target_days,
+            max_latest_lag_hours=args.max_latest_lag_hours,
+        )
         return emit(payload)
     if args.command == "telegram-text":
         report = run_backtest(runtime_dir, load_strategy(args.strategy_json), write=True) if args.refresh else status(runtime_dir).get("latestReport", {})

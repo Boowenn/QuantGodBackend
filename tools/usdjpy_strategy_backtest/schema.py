@@ -13,6 +13,7 @@ INGEST_REPORT_FILE = "QuantGod_USDJPYKlineIngestReport.json"
 HISTORY_SYNC_REPORT_FILE = "QuantGod_USDJPYHistoricalKlineSyncReport.json"
 BACKTEST_CACHE_FILE = "QuantGod_StrategyBacktestCache.json"
 QUALITY_REPORT_FILE = "QuantGod_StrategyBacktestQualityReport.json"
+PRODUCTION_STATUS_FILE = "QuantGod_USDJPYHistoryProductionStatus.json"
 
 SAFETY_BOUNDARY: Dict[str, Any] = {
     "usdJpyOnly": True,
@@ -63,3 +64,7 @@ def backtest_cache_path(runtime_dir: Path) -> Path:
 
 def quality_report_path(runtime_dir: Path) -> Path:
     return backtest_dir(runtime_dir) / QUALITY_REPORT_FILE
+
+
+def production_status_path(runtime_dir: Path) -> Path:
+    return backtest_dir(runtime_dir) / PRODUCTION_STATUS_FILE

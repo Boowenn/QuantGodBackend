@@ -93,7 +93,7 @@ class Mt5RsiExitProtectionTests(unittest.TestCase):
         self.assertIn('"USDJPY_NIGHT_REVERSION_SAFE"', text)
         self.assertIn('"USDJPY_H4_TREND_PULLBACK"', text)
 
-        order_send_block = text.split("bool SendPilotMarketOrder", 1)[1].split("bool ShouldSkipPilotEntry", 1)[0]
+        order_send_block = text.split("bool SendPilotMarketOrder", 1)[1].split("void ClosePilotPositions", 1)[0]
         for route in USDJPY_SHADOW_ROUTES:
             self.assertNotIn(route, order_send_block)
 
@@ -272,6 +272,7 @@ class Mt5RsiExitProtectionTests(unittest.TestCase):
         self.assertIn('patch_ini_section_key "$MT5_SHADOW_CONFIG" "Charts" "MaxBars" "$QG_MT5_MAX_BARS"', launcher_text)
         self.assertIn("terminal.ini", launcher_text)
         self.assertIn("QG_USDJPY_HISTORY_SYNC_ENABLED", launcher_text)
+        self.assertIn("QG_USDJPY_HISTORY_MAX_LAG_HOURS", launcher_text)
         self.assertIn("MT5_SHADOW_SCREEN", launcher_text)
         self.assertIn("MT5_LIVE_SCREEN", launcher_text)
         self.assertIn("terminal64.exe /portable", launcher_text)

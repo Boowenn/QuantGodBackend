@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
-from .schema import FOCUS_SYMBOL, SAFETY_BOUNDARY, history_sync_report_path
+from .schema import AGENT_VERSION, FOCUS_SYMBOL, SAFETY_BOUNDARY, history_sync_report_path, production_status_path
 from .sqlite_store import (
     Bar,
     bar_coverage_summary,
@@ -30,6 +30,7 @@ MT5_TIMEFRAME_ATTRS = {
 }
 CHUNK_DAYS = {"M1": 21, "M5": 60, "M15": 120, "H1": 180}
 MQL5_EXPORT_SOURCE = "MQL5_COPYRATES_EXPORT_FALLBACK"
+DEFAULT_MAX_LATEST_LAG_HOURS = 96
 
 
 def sync_historical_klines(
@@ -42,6 +43,7 @@ def sync_historical_klines(
     terminal_path: str | None = None,
     full_refresh: bool = False,
     max_bars_per_timeframe: int = 700000,
+    max_latest_lag_hours: float | None = None,
     write: bool = True,
 ) -> Dict[str, Any]:
     """Incrementally sync real USDJPY bars from the local MT5 terminal into SQLite."""
@@ -50,6 +52,11 @@ def sync_historical_klines(
     target_days = int(lookback_days or max(180, int(months) * 31))
     now = datetime.now(timezone.utc).replace(microsecond=0)
     target_start = now - timedelta(days=target_days)
+    allowed_lag_hours = float(
+        max_latest_lag_hours
+        if max_latest_lag_hours is not None
+        else os.environ.get("QG_USDJPY_HISTORY_MAX_LAG_HOURS", DEFAULT_MAX_LATEST_LAG_HOURS)
+    )
     mt5_symbol = symbol or os.environ.get("QG_USDJPY_MT5_SYMBOL") or FOCUS_SYMBOL
     terminal = terminal_path or os.environ.get("QG_MT5_TERMINAL_PATH") or ""
     mt5, mt5_status = _load_mt5(terminal)
@@ -66,6 +73,7 @@ def sync_historical_klines(
         "targetEnd": _iso(now),
         "fullRefresh": bool(full_refresh),
         "maxBarsPerTimeframe": int(max_bars_per_timeframe),
+        "maxLatestLagHours": allowed_lag_hours,
         "mt5": mt5_status,
         "sync": {},
         "fallback": {},
@@ -88,6 +96,13 @@ def sync_historical_klines(
                 report["historyCoverage"] = bar_coverage_summary(conn)
             report["ok"] = any(item.get("receivedBars", 0) > 0 for item in report["sync"].values())
             report["historyTargetSatisfied"] = _target_satisfied(report.get("historyCoverage", {}), target_days)
+            report["productionStatus"] = build_history_production_status(
+                runtime_dir,
+                sync_report=report,
+                target_days=target_days,
+                max_latest_lag_hours=allowed_lag_hours,
+                now=now,
+            )
             report["reasonZh"] = _reason(report)
         else:
             export_report = ingest_mql5_exported_klines(
@@ -102,6 +117,13 @@ def sync_historical_klines(
                     report["historyCoverage"] = bar_coverage_summary(conn)
                 report["ok"] = True
                 report["historyTargetSatisfied"] = _target_satisfied(report.get("historyCoverage", {}), target_days)
+                report["productionStatus"] = build_history_production_status(
+                    runtime_dir,
+                    sync_report=report,
+                    target_days=target_days,
+                    max_latest_lag_hours=allowed_lag_hours,
+                    now=now,
+                )
                 report["reasonZh"] = _reason(report)
             else:
                 report["source"] = "RUNTIME_SNAPSHOT_FALLBACK"
@@ -113,6 +135,13 @@ def sync_historical_klines(
                     report["historyCoverage"] = bar_coverage_summary(conn)
                 report["ok"] = bool(report["fallback"]["runtimeSnapshot"].get("ok"))
                 report["historyTargetSatisfied"] = False
+                report["productionStatus"] = build_history_production_status(
+                    runtime_dir,
+                    sync_report=report,
+                    target_days=target_days,
+                    max_latest_lag_hours=allowed_lag_hours,
+                    now=now,
+                )
                 report["reasonZh"] = (
                     "未连接到本机 MT5 Python 历史数据源，也未发现 MQL5 CopyRates 导出；"
                     "已回退到运行快照增量写入，GA 历史样本仍不足。"
@@ -122,6 +151,10 @@ def sync_historical_klines(
     if write:
         history_sync_report_path(runtime_dir).parent.mkdir(parents=True, exist_ok=True)
         history_sync_report_path(runtime_dir).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        production_status_path(runtime_dir).write_text(
+            json.dumps(report.get("productionStatus") or {}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return report
 
 
@@ -135,20 +168,22 @@ def ingest_mql5_exported_klines(
     runtime_dir = Path(runtime_dir)
     selected_timeframes = _normalize_timeframes(timeframes)
     source_symbol = symbol or os.environ.get("QG_USDJPY_MT5_SYMBOL") or FOCUS_SYMBOL
-    export_dir = runtime_dir / "backtest" / "exported_klines"
-    manifest = _load_export_manifest(runtime_dir, export_dir)
+    export_dir_candidates = _candidate_export_dirs(runtime_dir)
+    export_dir = _select_export_dir(export_dir_candidates)
+    manifest = _load_export_manifest(runtime_dir, export_dir) if export_dir else {}
     report: Dict[str, Any] = {
         "ok": False,
         "schema": "quantgod.mql5_copyrates_export_ingest_report.v1",
         "source": "MQL5_COPYRATES_EXPORT",
         "symbol": FOCUS_SYMBOL,
         "sourceSymbol": source_symbol,
-        "exportDir": str(export_dir),
+        "exportDir": str(export_dir) if export_dir else "",
+        "exportDirCandidates": [str(item) for item in export_dir_candidates],
         "manifest": manifest,
         "timeframes": {},
         "safety": dict(SAFETY_BOUNDARY),
     }
-    if not export_dir.exists():
+    if export_dir is None or not export_dir.exists():
         report["reasonZh"] = "未发现 MQL5 CopyRates 导出目录，等待 EA/脚本写入 K 线 CSV。"
         return report
 
@@ -186,6 +221,99 @@ def ingest_mql5_exported_klines(
         else "发现 MQL5 导出目录，但没有可用 USDJPY K 线 CSV。"
     )
     return report
+
+
+def build_history_production_status(
+    runtime_dir: Path,
+    *,
+    sync_report: Dict[str, Any] | None = None,
+    target_days: int = 372,
+    max_latest_lag_hours: float = DEFAULT_MAX_LATEST_LAG_HOURS,
+    now: datetime | None = None,
+) -> Dict[str, Any]:
+    """Build a verifiable production readiness snapshot for USDJPY SQLite history."""
+    runtime_dir = Path(runtime_dir)
+    sync_report = sync_report if isinstance(sync_report, dict) else {}
+    checked_at = (now or datetime.now(timezone.utc)).replace(microsecond=0)
+    required_span_days = max(1.0, float(target_days) * 0.85)
+    with connect(runtime_dir) as conn:
+        coverage = bar_coverage_summary(conn)
+    rows: Dict[str, Any] = {}
+    failed: List[Dict[str, Any]] = []
+    for timeframe in DEFAULT_HISTORY_TIMEFRAMES:
+        row = coverage.get("timeframes", {}).get(timeframe, {})
+        latest = _parse_iso(row.get("latestBar"))
+        latest_lag_hours = (
+            round((checked_at - latest).total_seconds() / 3600.0, 3)
+            if latest is not None and checked_at >= latest
+            else None
+        )
+        expected_bars = _expected_min_bars(required_span_days, timeframe)
+        bar_count = int(row.get("barCount") or 0)
+        span_days = float(row.get("spanDays") or 0.0)
+        span_ok = span_days >= required_span_days
+        density_ok = bar_count >= expected_bars
+        freshness_ok = latest_lag_hours is not None and latest_lag_hours <= float(max_latest_lag_hours)
+        passed = span_ok and density_ok and freshness_ok
+        rows[timeframe] = {
+            "timeframe": timeframe,
+            "barCount": bar_count,
+            "expectedMinBars": expected_bars,
+            "earliestBar": row.get("earliestBar"),
+            "latestBar": row.get("latestBar"),
+            "spanDays": span_days,
+            "requiredSpanDays": round(required_span_days, 3),
+            "latestLagHours": latest_lag_hours,
+            "maxLatestLagHours": float(max_latest_lag_hours),
+            "spanOk": span_ok,
+            "densityOk": density_ok,
+            "freshnessOk": freshness_ok,
+            "passed": passed,
+            "reasonZh": _timeframe_production_reason(timeframe, span_ok, density_ok, freshness_ok, span_days, bar_count, expected_bars),
+        }
+        if not passed:
+            failed.append(rows[timeframe])
+    source = str(sync_report.get("source") or "UNKNOWN")
+    mql5_export = {}
+    fallback = sync_report.get("fallback") if isinstance(sync_report.get("fallback"), dict) else {}
+    if isinstance(fallback.get("mql5Export"), dict):
+        mql5_export = fallback["mql5Export"]
+    status = "PASS" if not failed and bool(sync_report.get("ok", True)) else "WARN"
+    return {
+        "ok": status == "PASS",
+        "schema": "quantgod.usdjpy_history_production_status.v1",
+        "agentVersion": AGENT_VERSION,
+        "generatedAt": _iso(checked_at),
+        "symbol": FOCUS_SYMBOL,
+        "targetLookbackDays": int(target_days),
+        "requiredSpanDays": round(required_span_days, 3),
+        "maxLatestLagHours": float(max_latest_lag_hours),
+        "status": status,
+        "historyTargetSatisfied": status == "PASS",
+        "failedCount": len(failed),
+        "timeframes": rows,
+        "source": {
+            "syncSource": source,
+            "sqlite": str((runtime_dir / "backtest" / "usdjpy.sqlite").resolve()),
+            "runtimeDir": str(runtime_dir.resolve()),
+            "mql5ExportDir": mql5_export.get("exportDir") or "",
+            "mt5PythonStatus": (sync_report.get("mt5") if isinstance(sync_report.get("mt5"), dict) else {}).get("status"),
+            "mql5ExportOk": bool(mql5_export.get("ok")),
+        },
+        "continuousSync": {
+            "expected": True,
+            "intervalSeconds": int(float(os.environ.get("QG_USDJPY_HISTORY_INTERVAL_SECONDS", "3600"))),
+            "script": "tools/run_mac_usdjpy_history_sync_loop.sh --loop",
+            "launchdService": "com.quantgod.usdjpy-history-sync",
+            "reasonZh": "后台应每小时刷新 sync-klines 与 quality，保持 SQLite 和 MT5 CopyRates 导出同步。",
+        },
+        "reasonZh": (
+            "USDJPY SQLite 历史数据生产状态通过：M1/M5/M15/H1 覆盖、密度和最新延迟均满足目标。"
+            if status == "PASS"
+            else "USDJPY SQLite 历史数据仍未达到生产验收；请继续运行 MQL5 CopyRates exporter 与后台 sync-klines。"
+        ),
+        "safety": dict(SAFETY_BOUNDARY),
+    }
 
 
 def _sync_from_mt5(
@@ -297,6 +425,40 @@ def _load_export_manifest(runtime_dir: Path, export_dir: Path) -> Dict[str, Any]
         except Exception:
             return {"unreadablePath": str(path)}
     return {}
+
+
+def _candidate_export_dirs(runtime_dir: Path) -> List[Path]:
+    candidates: List[Path] = []
+    roots: List[Path] = [Path(runtime_dir)]
+    env_mt5_files = os.environ.get("QG_MT5_FILES_DIR") or ""
+    if env_mt5_files:
+        roots.append(Path(env_mt5_files).expanduser())
+    roots.append(_default_mac_mt5_files_dir())
+    seen: set[str] = set()
+    for root in roots:
+        export_dir = (root / "backtest" / "exported_klines").resolve()
+        key = str(export_dir)
+        if key not in seen:
+            candidates.append(export_dir)
+            seen.add(key)
+    return candidates
+
+
+def _select_export_dir(candidates: List[Path]) -> Path | None:
+    existing = [item for item in candidates if item.exists()]
+    if not existing:
+        return None
+    for item in existing:
+        if (item / "QuantGod_USDJPY_KlineExportManifest.json").exists() or list(item.glob("QuantGod_*USDJPY*_*_rates.csv")):
+            return item
+    return existing[0]
+
+
+def _default_mac_mt5_files_dir() -> Path:
+    return (
+        Path.home()
+        / "Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Files"
+    )
 
 
 def _find_mql5_export_file(export_dir: Path, source_symbol: str, timeframe: str) -> Path | None:
@@ -461,6 +623,34 @@ def _target_satisfied(history_coverage: Dict[str, Any], target_days: int) -> boo
         if int(data.get("barCount") or 0) <= 0:
             return False
     return True
+
+
+def _expected_min_bars(required_span_days: float, timeframe: str) -> int:
+    # FX has weekend gaps and broker maintenance gaps; 45% of wall-clock bars is
+    # conservative enough for a 6-12 month production-history readiness check.
+    seconds = TIMEFRAME_SECONDS[timeframe]
+    return max(1, int((float(required_span_days) * 86400.0 / float(seconds)) * 0.45))
+
+
+def _timeframe_production_reason(
+    timeframe: str,
+    span_ok: bool,
+    density_ok: bool,
+    freshness_ok: bool,
+    span_days: float,
+    bar_count: int,
+    expected_bars: int,
+) -> str:
+    if span_ok and density_ok and freshness_ok:
+        return f"{timeframe} 历史覆盖、K线密度和最新延迟均通过。"
+    parts: List[str] = []
+    if not span_ok:
+        parts.append(f"覆盖天数不足：{span_days} 天")
+    if not density_ok:
+        parts.append(f"K线数量不足：{bar_count}/{expected_bars}")
+    if not freshness_ok:
+        parts.append("最新 K 线延迟超出阈值")
+    return "；".join(parts) or f"{timeframe} 未通过生产验收。"
 
 
 def _reason(report: Dict[str, Any]) -> str:

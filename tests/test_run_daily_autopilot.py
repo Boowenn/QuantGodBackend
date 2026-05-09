@@ -290,8 +290,11 @@ class DailyAutopilotTests(unittest.TestCase):
         self.assertIn("QG_USDJPY_HISTORY_TIMEFRAMES", script)
         self.assertIn("QG_USDJPY_HISTORY_INTERVAL_SECONDS", script)
         self.assertIn("QG_USDJPY_HISTORY_MAX_BARS", script)
+        self.assertIn("QG_USDJPY_HISTORY_MAX_LAG_HOURS", script)
         self.assertIn("--terminal-path", script)
         self.assertIn("--max-bars-per-timeframe", script)
+        self.assertIn("--max-latest-lag-hours", script)
+        self.assertIn("tools/run_usdjpy_strategy_backtest.py --runtime-dir \"$RUNTIME_DIR\" quality", script)
 
     def test_mt5_permission_log_is_not_triage_when_current_dashboard_recovered(self):
         with tempfile.TemporaryDirectory() as tmp:

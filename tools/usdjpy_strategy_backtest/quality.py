@@ -13,6 +13,11 @@ def build_quality_report(status_payload: Dict[str, Any], latest_report: Dict[str
     coverage = status_payload.get("historyCoverage") if isinstance(status_payload.get("historyCoverage"), dict) else {}
     timeframes = coverage.get("timeframes") if isinstance(coverage.get("timeframes"), dict) else {}
     latest_sync = status_payload.get("historySyncReport") if isinstance(status_payload.get("historySyncReport"), dict) else {}
+    production_status = (
+        status_payload.get("historyProductionStatus")
+        if isinstance(status_payload.get("historyProductionStatus"), dict)
+        else {}
+    )
     checks = []
     for timeframe in ("M1", "M5", "M15", "H1"):
         row = timeframes.get(timeframe) if isinstance(timeframes.get(timeframe), dict) else {}
@@ -43,6 +48,11 @@ def build_quality_report(status_payload: Dict[str, Any], latest_report: Dict[str
                 "passed": bool(latest_sync.get("historyTargetSatisfied")),
                 "detailZh": latest_sync.get("reasonZh") or "等待历史 K 线同步报告。",
             },
+            {
+                "check": "HISTORY_PRODUCTION_STATUS",
+                "passed": bool(production_status.get("historyTargetSatisfied")),
+                "detailZh": production_status.get("reasonZh") or "等待 USDJPY 历史数据生产状态报告。",
+            },
         ]
     )
     failed = [item for item in checks if not item.get("passed")]
@@ -55,6 +65,13 @@ def build_quality_report(status_payload: Dict[str, Any], latest_report: Dict[str
         "failedCount": len(failed),
         "checks": checks,
         "historyTargetSatisfied": bool(latest_sync.get("historyTargetSatisfied")),
+        "historyProductionStatus": {
+            "present": bool(production_status),
+            "status": production_status.get("status") or "MISSING",
+            "historyTargetSatisfied": bool(production_status.get("historyTargetSatisfied")),
+            "failedCount": int(production_status.get("failedCount") or 0),
+            "source": production_status.get("source") if isinstance(production_status.get("source"), dict) else {},
+        },
         "cache": latest_report.get("cache") if isinstance(latest_report.get("cache"), dict) else {},
         "reasonZh": (
             "Backtest Engine 生产化检查通过：历史深度、动态成本、新闻门禁和同步状态可用于 GA 评分。"

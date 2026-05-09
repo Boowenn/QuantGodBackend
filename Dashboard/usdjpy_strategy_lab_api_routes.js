@@ -501,6 +501,15 @@ async function handle(req, res, ctx) {
     sendJson(res, payload && payload.ok === false ? 500 : 200, payload);
     return;
   }
+  if (req.method === 'GET' && pathname === '/api/usdjpy-strategy-lab/strategy-backtest/production-status') {
+    const args = ['--runtime-dir', runtimeDir, 'production-status'];
+    if (url.searchParams.get('months')) args.push('--months', url.searchParams.get('months'));
+    if (url.searchParams.get('lookbackDays')) args.push('--lookback-days', url.searchParams.get('lookbackDays'));
+    if (url.searchParams.get('maxLatestLagHours')) args.push('--max-latest-lag-hours', url.searchParams.get('maxLatestLagHours'));
+    const payload = await runPythonJson(ctx.repoRoot, args, 120000, 'run_usdjpy_strategy_backtest.py');
+    sendJson(res, payload && payload.ok === false ? 500 : 200, payload);
+    return;
+  }
   if (req.method === 'GET' && pathname === '/api/usdjpy-strategy-lab/strategy-backtest/telegram-text') {
     const args = ['--runtime-dir', runtimeDir, 'telegram-text'];
     if (url.searchParams.get('refresh') === '1') args.push('--refresh');
@@ -514,6 +523,7 @@ async function handle(req, res, ctx) {
     if (url.searchParams.get('months')) args.push('--months', url.searchParams.get('months'));
     if (url.searchParams.get('lookbackDays')) args.push('--lookback-days', url.searchParams.get('lookbackDays'));
     if (url.searchParams.get('timeframes')) args.push('--timeframes', url.searchParams.get('timeframes'));
+    if (url.searchParams.get('maxLatestLagHours')) args.push('--max-latest-lag-hours', url.searchParams.get('maxLatestLagHours'));
     const payload = await runPythonJson(ctx.repoRoot, args, 300000, 'run_usdjpy_strategy_backtest.py');
     sendJson(res, payload && payload.ok === false ? 500 : 200, payload);
     return;

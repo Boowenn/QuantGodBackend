@@ -67,6 +67,7 @@ export QG_USDJPY_HISTORY_MONTHS="${QG_USDJPY_HISTORY_MONTHS:-12}"
 export QG_USDJPY_HISTORY_TIMEFRAMES="${QG_USDJPY_HISTORY_TIMEFRAMES:-M1,M5,M15,H1}"
 export QG_USDJPY_HISTORY_INTERVAL_SECONDS="${QG_USDJPY_HISTORY_INTERVAL_SECONDS:-3600}"
 export QG_USDJPY_HISTORY_MAX_BARS="${QG_USDJPY_HISTORY_MAX_BARS:-700000}"
+export QG_USDJPY_HISTORY_MAX_LAG_HOURS="${QG_USDJPY_HISTORY_MAX_LAG_HOURS:-96}"
 
 MODE="--loop"
 if [[ "${1:-}" == "--once" ]]; then
@@ -88,6 +89,7 @@ history_sync_command() {
     --symbol "$QG_USDJPY_MT5_SYMBOL"
     --terminal-path "$QG_MT5_TERMINAL_PATH"
     --max-bars-per-timeframe "$QG_USDJPY_HISTORY_MAX_BARS"
+    --max-latest-lag-hours "$QG_USDJPY_HISTORY_MAX_LAG_HOURS"
   )
   if [[ -n "${QG_USDJPY_HISTORY_LOOKBACK_DAYS:-}" ]]; then
     command+=(--lookback-days "$QG_USDJPY_HISTORY_LOOKBACK_DAYS")
@@ -101,8 +103,9 @@ run_once() {
   echo "mt5FilesDir=$QG_MT5_FILES_DIR"
   echo "mt5TerminalPath=$QG_MT5_TERMINAL_PATH"
   echo "mt5PythonBin=$QG_MT5_PYTHON_BIN"
-  echo "months=$QG_USDJPY_HISTORY_MONTHS timeframes=$QG_USDJPY_HISTORY_TIMEFRAMES symbol=$QG_USDJPY_MT5_SYMBOL"
+  echo "months=$QG_USDJPY_HISTORY_MONTHS timeframes=$QG_USDJPY_HISTORY_TIMEFRAMES symbol=$QG_USDJPY_MT5_SYMBOL maxLatestLagHours=$QG_USDJPY_HISTORY_MAX_LAG_HOURS"
   history_sync_command || echo "USDJPY historical kline sync failed"
+  "$QG_MT5_PYTHON_BIN" tools/run_usdjpy_strategy_backtest.py --runtime-dir "$RUNTIME_DIR" quality || echo "USDJPY strategy backtest quality refresh failed"
   echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] USDJPY historical kline sync complete"
 }
 

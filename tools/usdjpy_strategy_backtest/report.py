@@ -27,6 +27,7 @@ from .schema import (
     equity_path,
     history_sync_report_path,
     ingest_report_path,
+    production_status_path,
     quality_report_path,
     report_path,
     trades_path,
@@ -52,6 +53,7 @@ def status(runtime_dir: Path) -> Dict[str, Any]:
     report = _load_json(report_path(runtime_dir))
     ingest_report = _load_json(ingest_report_path(runtime_dir))
     history_sync_report = _load_json(history_sync_report_path(runtime_dir))
+    production_status = _load_json(production_status_path(runtime_dir))
     quality_report = _load_json(quality_report_path(runtime_dir))
     return {
         "ok": True,
@@ -63,6 +65,7 @@ def status(runtime_dir: Path) -> Dict[str, Any]:
         "historyCoverage": history_coverage,
         "ingestReport": ingest_report,
         "historySyncReport": history_sync_report,
+        "historyProductionStatus": production_status,
         "qualityReport": quality_report,
         "latestReport": report,
         "paths": {
@@ -70,6 +73,7 @@ def status(runtime_dir: Path) -> Dict[str, Any]:
             "report": str(report_path(runtime_dir).resolve()),
             "trades": str(trades_path(runtime_dir).resolve()),
             "equity": str(equity_path(runtime_dir).resolve()),
+            "historyProductionStatus": str(production_status_path(runtime_dir).resolve()),
         },
         "safety": dict(SAFETY_BOUNDARY),
     }

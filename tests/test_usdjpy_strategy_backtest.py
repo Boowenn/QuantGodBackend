@@ -1,4 +1,5 @@
 import tempfile
+import json
 import sys
 import types
 import unittest
@@ -16,6 +17,7 @@ from tools.usdjpy_strategy_backtest.schema import (
     backtest_cache_path,
     equity_path,
     history_sync_report_path,
+    production_status_path,
     quality_report_path,
     report_path,
     trades_path,
@@ -278,11 +280,65 @@ class USDJPYStrategyBacktestTests(unittest.TestCase):
             self.assertEqual(report["source"], "MQL5_COPYRATES_EXPORT_FALLBACK")
             self.assertTrue(report["fallback"]["mql5Export"]["ok"])
             self.assertEqual(report["fallback"]["mql5Export"]["source"], "MQL5_COPYRATES_EXPORT")
+            self.assertEqual(report["productionStatus"]["schema"], "quantgod.usdjpy_history_production_status.v1")
+            self.assertTrue(production_status_path(runtime_dir).exists())
             with connect(runtime_dir) as conn:
                 for timeframe in ("M1", "M5", "M15", "H1"):
                     self.assertEqual(count_bars(conn, timeframe), 3)
                 m1_bars = load_bars(conn, "M1", limit=1)
                 self.assertEqual(m1_bars[0].spread, 10.0)
+
+    def test_history_sync_discovers_external_mt5_files_export_and_marks_production_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_dir = root / "repo_runtime"
+            mt5_files_dir = root / "MetaTrader 5" / "MQL5" / "Files"
+            export_dir = mt5_files_dir / "backtest" / "exported_klines"
+            export_dir.mkdir(parents=True)
+            latest = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+            start = latest - timedelta(days=3)
+            steps = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600}
+            for timeframe, step in steps.items():
+                rows = ["epoch,timestamp,open,high,low,close,tick_volume,spread,real_volume"]
+                cursor = start
+                index = 0
+                while cursor <= latest:
+                    epoch = int(cursor.timestamp())
+                    price = 156.0 + (index % 40) * 0.001
+                    rows.append(
+                        f"{epoch},{cursor.strftime('%Y.%m.%d %H:%M:%S')},"
+                        f"{price:.3f},{price + 0.015:.3f},{price - 0.015:.3f},{price + 0.004:.3f},"
+                        f"{1000 + index},10,0"
+                    )
+                    cursor += timedelta(seconds=step)
+                    index += 1
+                (export_dir / f"QuantGod_USDJPYc_{timeframe}_rates.csv").write_text("\n".join(rows), encoding="utf-8")
+            (export_dir / "QuantGod_USDJPY_KlineExportManifest.json").write_text(
+                json.dumps({"schema": "quantgod.mql5_kline_export_manifest.v1", "source": "MQL5_COPYRATES_EXPORT"}),
+                encoding="utf-8",
+            )
+
+            with patch.dict("os.environ", {"QG_MT5_FILES_DIR": str(mt5_files_dir)}):
+                with patch("tools.usdjpy_strategy_backtest.history_sync.importlib.import_module", side_effect=ImportError("no mt5")):
+                    report = sync_historical_klines(
+                        runtime_dir,
+                        lookback_days=3,
+                        timeframes=("M1", "M5", "M15", "H1"),
+                        max_latest_lag_hours=2,
+                    )
+
+            self.assertTrue(report["ok"], report)
+            self.assertEqual(report["source"], "MQL5_COPYRATES_EXPORT_FALLBACK")
+            self.assertEqual(report["fallback"]["mql5Export"]["exportDir"], str(export_dir.resolve()))
+            production = report["productionStatus"]
+            self.assertEqual(production["schema"], "quantgod.usdjpy_history_production_status.v1")
+            self.assertTrue(production["historyTargetSatisfied"], production)
+            self.assertEqual(production["status"], "PASS")
+            self.assertEqual(production["source"]["mql5ExportDir"], str(export_dir.resolve()))
+            current = status(runtime_dir)
+            self.assertEqual(current["historyProductionStatus"]["status"], "PASS")
+            with connect(runtime_dir) as conn:
+                self.assertGreaterEqual(count_bars(conn, "M1"), 3 * 24 * 60)
 
 
 if __name__ == "__main__":
