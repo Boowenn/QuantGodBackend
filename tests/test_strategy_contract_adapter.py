@@ -106,6 +106,89 @@ class StrategyContractAdapterTests(unittest.TestCase):
             self.assertIn("h4FastEmaPeriod=30", ea_text)
             self.assertIn("h4SlowEmaPeriod=80", ea_text)
 
+    def test_build_can_force_valid_family_for_shadow_contract_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            sr_seed = base_strategy_seed("GA-USDJPY-SR-TOP", family="SR_Breakout")
+            ma_seed = base_strategy_seed("GA-USDJPY-MA-ROTATE", family="MA_Cross")
+            ga_path = ga_dir(runtime) / CANDIDATE_RUNS_FILE
+            ga_path.parent.mkdir(parents=True, exist_ok=True)
+            rows = [
+                {
+                    "seedId": sr_seed["seedId"],
+                    "status": "ELITE_SELECTED",
+                    "promotionStage": "TESTER_ONLY",
+                    "fitness": 10.0,
+                    "strategyJson": sr_seed,
+                },
+                {
+                    "seedId": ma_seed["seedId"],
+                    "status": "NEEDS_MORE_DATA",
+                    "promotionStage": "SHADOW",
+                    "fitness": 0.1,
+                    "strategyJson": ma_seed,
+                },
+            ]
+            ga_path.write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+
+            payload = build_strategy_contract(runtime, write=True, forced_family="MA_Cross")
+            contract = payload["contract"]
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(contract["selectionSource"], "GA_CANDIDATE_FORCED_FAMILY")
+            self.assertEqual(contract["forcedFamily"], "MA_Cross")
+            self.assertEqual(contract["strategy"]["strategyFamily"], "MA_Cross")
+            self.assertEqual(contract["selectedSeedId"], "GA-USDJPY-MA-ROTATE")
+            self.assertEqual(contract["contractMode"], "SHADOW_EVALUATION_ONLY")
+            self.assertFalse(contract["safety"]["orderSendAllowed"])
+            self.assertFalse(contract["safety"]["livePresetMutationAllowed"])
+
+    def test_build_can_force_valid_seed_for_shadow_contract_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            sr_seed = base_strategy_seed("GA-USDJPY-SR-TOP", family="SR_Breakout")
+            bb_seed = base_strategy_seed("GA-USDJPY-BB-ROTATE", family="BB_Triple")
+            ga_path = ga_dir(runtime) / CANDIDATE_RUNS_FILE
+            ga_path.parent.mkdir(parents=True, exist_ok=True)
+            rows = [
+                {
+                    "seedId": sr_seed["seedId"],
+                    "status": "ELITE_SELECTED",
+                    "promotionStage": "TESTER_ONLY",
+                    "fitness": 10.0,
+                    "strategyJson": sr_seed,
+                },
+                {
+                    "seedId": bb_seed["seedId"],
+                    "status": "NEEDS_MORE_DATA",
+                    "promotionStage": "SHADOW",
+                    "fitness": 0.1,
+                    "strategyJson": bb_seed,
+                },
+            ]
+            ga_path.write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+
+            payload = build_strategy_contract(runtime, write=True, forced_seed_id="GA-USDJPY-BB-ROTATE")
+            contract = payload["contract"]
+
+            self.assertEqual(contract["selectionSource"], "GA_CANDIDATE_FORCED_SEED")
+            self.assertEqual(contract["forcedSeedId"], "GA-USDJPY-BB-ROTATE")
+            self.assertEqual(contract["strategy"]["strategyFamily"], "BB_Triple")
+            self.assertEqual(contract["selectedSeedId"], "GA-USDJPY-BB-ROTATE")
+            self.assertFalse(contract["safety"]["gaDirectLiveAllowed"])
+
+    def test_forced_rotation_rejects_missing_family_without_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            with self.assertRaises(ValueError):
+                build_strategy_contract(runtime, write=True, forced_family="MA_Cross")
+
     def test_status_reads_ea_ack_without_granting_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = Path(tmp)

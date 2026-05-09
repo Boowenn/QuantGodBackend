@@ -44,21 +44,50 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     status = sub.add_parser("status")
     status.add_argument("--write", action="store_true")
-    sub.add_parser("build")
+    status.add_argument("--seed-id")
+    status.add_argument("--family")
+    build = sub.add_parser("build")
+    build.add_argument("--seed-id")
+    build.add_argument("--family")
     text = sub.add_parser("telegram-text")
     text.add_argument("--refresh", action="store_true")
     text.add_argument("--send", action="store_true")
+    text.add_argument("--seed-id")
+    text.add_argument("--family")
     args = parser.parse_args(argv)
     runtime_dir = Path(args.runtime_dir)
 
     if args.command == "status":
         if args.write:
-            return emit(build_strategy_contract(runtime_dir, write=True))
+            return emit(
+                build_strategy_contract(
+                    runtime_dir,
+                    write=True,
+                    forced_seed_id=args.seed_id,
+                    forced_family=args.family,
+                )
+            )
         return emit(read_strategy_contract_status(runtime_dir))
     if args.command == "build":
-        return emit(build_strategy_contract(runtime_dir, write=True))
+        return emit(
+            build_strategy_contract(
+                runtime_dir,
+                write=True,
+                forced_seed_id=args.seed_id,
+                forced_family=args.family,
+            )
+        )
     if args.command == "telegram-text":
-        payload = build_strategy_contract(runtime_dir, write=True) if args.refresh else read_strategy_contract_status(runtime_dir)
+        payload = (
+            build_strategy_contract(
+                runtime_dir,
+                write=True,
+                forced_seed_id=args.seed_id,
+                forced_family=args.family,
+            )
+            if args.refresh
+            else read_strategy_contract_status(runtime_dir)
+        )
         content = contract_to_chinese_text(payload)
         result = {"ok": True, "text": content, "contractStatus": payload}
         if args.send:
@@ -70,4 +99,3 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     raise SystemExit(main())
-

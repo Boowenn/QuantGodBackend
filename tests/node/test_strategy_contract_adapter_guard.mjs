@@ -46,6 +46,10 @@ test('Strategy JSON contract backend writes only shadow/tester/paper adapter fil
     'tokyoTradeStartHourUtc',
     'nightBollingerPeriod',
     'h4FastEmaPeriod',
+    'forced_seed_id',
+    'forced_family',
+    'GA_CANDIDATE_FORCED_SEED',
+    'GA_CANDIDATE_FORCED_FAMILY',
   ]) {
     assert.match(source, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }

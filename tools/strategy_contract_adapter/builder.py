@@ -9,13 +9,13 @@ try:
     from strategy_ga.schema import CANDIDATE_RUNS_FILE, ELITE_FILE, ga_dir
     from strategy_json.fingerprint import strategy_fingerprint
     from strategy_json.normalizer import normalize_strategy_json
-    from strategy_json.schema import FOCUS_SYMBOL, base_strategy_seed
+    from strategy_json.schema import ALLOWED_STRATEGY_FAMILIES, FOCUS_SYMBOL, base_strategy_seed
     from strategy_json.validator import validate_strategy_json
 except ModuleNotFoundError:  # pragma: no cover - package import path for unittest
     from tools.strategy_ga.schema import CANDIDATE_RUNS_FILE, ELITE_FILE, ga_dir
     from tools.strategy_json.fingerprint import strategy_fingerprint
     from tools.strategy_json.normalizer import normalize_strategy_json
-    from tools.strategy_json.schema import FOCUS_SYMBOL, base_strategy_seed
+    from tools.strategy_json.schema import ALLOWED_STRATEGY_FAMILIES, FOCUS_SYMBOL, base_strategy_seed
     from tools.strategy_json.validator import validate_strategy_json
 
 from .schema import (
@@ -159,15 +159,62 @@ def _valid_candidate_rows(runtime_dir: Path) -> Iterable[Tuple[Dict[str, Any], D
             yield row, validation
 
 
-def select_strategy_candidate(runtime_dir: Path) -> Dict[str, Any]:
-    for row, validation in _valid_candidate_rows(runtime_dir):
-        return {
-            "source": "GA_CANDIDATE",
-            "reasonZh": "选择最新 GA elite / shadow 候选作为 EA 只读评估契约。",
-            "row": row,
-            "validation": validation,
-            "strategyJson": validation.get("normalized") or normalize_strategy_json(row.get("strategyJson") or {}),
-        }
+def _selection_from_row(
+    row: Dict[str, Any],
+    validation: Dict[str, Any],
+    *,
+    source: str,
+    reason_zh: str,
+) -> Dict[str, Any]:
+    return {
+        "source": source,
+        "reasonZh": reason_zh,
+        "row": row,
+        "validation": validation,
+        "strategyJson": validation.get("normalized") or normalize_strategy_json(row.get("strategyJson") or {}),
+    }
+
+
+def select_strategy_candidate(
+    runtime_dir: Path,
+    *,
+    forced_seed_id: str | None = None,
+    forced_family: str | None = None,
+) -> Dict[str, Any]:
+    forced_seed_id = _safe_str(forced_seed_id)
+    forced_family = _safe_str(forced_family)
+    candidates = list(_valid_candidate_rows(runtime_dir))
+    if forced_seed_id:
+        for row, validation in candidates:
+            strategy_json = validation.get("normalized") or normalize_strategy_json(row.get("strategyJson") or {})
+            if str(strategy_json.get("seedId") or row.get("seedId") or "") == forced_seed_id:
+                return _selection_from_row(
+                    row,
+                    validation,
+                    source="GA_CANDIDATE_FORCED_SEED",
+                    reason_zh="按 seedId 轮换 Strategy JSON → EA 只读影子评估契约；不代表晋级或实盘授权。",
+                )
+        raise ValueError(f"Strategy JSON seed not found or invalid for shadow contract rotation: {forced_seed_id}")
+    if forced_family:
+        if forced_family not in ALLOWED_STRATEGY_FAMILIES:
+            raise ValueError(f"Strategy JSON family is not allowed for shadow contract rotation: {forced_family}")
+        for row, validation in candidates:
+            strategy_json = validation.get("normalized") or normalize_strategy_json(row.get("strategyJson") or {})
+            if str(strategy_json.get("strategyFamily") or "") == forced_family:
+                return _selection_from_row(
+                    row,
+                    validation,
+                    source="GA_CANDIDATE_FORCED_FAMILY",
+                    reason_zh=f"按策略族 {forced_family} 轮换 Strategy JSON → EA 只读影子评估契约；不代表晋级或实盘授权。",
+                )
+        raise ValueError(f"Strategy JSON family has no valid GA candidate for shadow contract rotation: {forced_family}")
+    for row, validation in candidates:
+        return _selection_from_row(
+            row,
+            validation,
+            source="GA_CANDIDATE",
+            reason_zh="选择最新 GA elite / shadow 候选作为 EA 只读评估契约。",
+        )
     seed = base_strategy_seed("SAFE_BASE_USDJPY_RSI_LONG")
     validation = validate_strategy_json(seed)
     return {
@@ -351,8 +398,14 @@ def _read_shadow_evaluation_ledger(runtime_dir: Path, limit: int = 20) -> List[D
     return rows[-limit:]
 
 
-def build_strategy_contract(runtime_dir: Path, write: bool = True) -> Dict[str, Any]:
-    selection = select_strategy_candidate(runtime_dir)
+def build_strategy_contract(
+    runtime_dir: Path,
+    write: bool = True,
+    *,
+    forced_seed_id: str | None = None,
+    forced_family: str | None = None,
+) -> Dict[str, Any]:
+    selection = select_strategy_candidate(runtime_dir, forced_seed_id=forced_seed_id, forced_family=forced_family)
     strategy_json = selection["strategyJson"]
     strategy = _strategy_summary(strategy_json)
     fingerprint = strategy_fingerprint(strategy_json)
@@ -369,6 +422,8 @@ def build_strategy_contract(runtime_dir: Path, write: bool = True) -> Dict[str, 
         "selectedSeedId": strategy_json.get("seedId"),
         "selectionSource": selection["source"],
         "selectionReasonZh": selection["reasonZh"],
+        "forcedSeedId": forced_seed_id or None,
+        "forcedFamily": forced_family or None,
         "fingerprint": fingerprint,
         "strategy": strategy,
         "strategyJson": strategy_json,
