@@ -82,6 +82,28 @@ function runPythonJson(repoRoot, args, timeoutMs = 45000, scriptName = 'run_usdj
   });
 }
 
+function readFreshAgentOpsHealth(runtimeDir, maxAgeSeconds = 360) {
+  try {
+    const filePath = path.join(runtimeDir, 'agent', 'QuantGod_AgentOpsHealth.json');
+    if (!fs.existsSync(filePath)) return null;
+    const payload = JSON.parse(fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, ''));
+    const generatedAt = Date.parse(payload.generatedAtIso || payload.generatedAt || '');
+    if (!Number.isFinite(generatedAt)) return null;
+    const ageSeconds = Math.max(0, (Date.now() - generatedAt) / 1000);
+    if (ageSeconds > maxAgeSeconds) return null;
+    return {
+      ...payload,
+      _cache: {
+        source: 'QuantGod_AgentOpsHealth.json',
+        ageSeconds,
+        maxAgeSeconds,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
 function readJsonBody(req) {
   return new Promise((resolve) => {
     let body = '';
@@ -607,9 +629,17 @@ async function handle(req, res, ctx) {
     req.method === 'GET' &&
     (pathname === '/api/usdjpy-strategy-lab/agent-ops-health' || pathname === '/api/usdjpy-strategy-lab/agent-ops-health/status')
   ) {
+    const forceRefresh = url.searchParams.get('write') === '1' || url.searchParams.get('refresh') === '1';
+    if (!forceRefresh) {
+      const cached = readFreshAgentOpsHealth(runtimeDir);
+      if (cached) {
+        sendJson(res, cached && cached.ok === false ? 500 : 200, cached);
+        return;
+      }
+    }
     const args = ['--runtime-dir', runtimeDir, '--repo-root', ctx.repoRoot, 'status'];
-    if (url.searchParams.get('write') === '1' || url.searchParams.get('refresh') === '1') args.push('--write');
-    const payload = await runPythonJson(ctx.repoRoot, args, 45000, 'run_agent_ops_health.py');
+    if (forceRefresh || !readFreshAgentOpsHealth(runtimeDir)) args.push('--write');
+    const payload = await runPythonJson(ctx.repoRoot, args, 120000, 'run_agent_ops_health.py');
     sendJson(res, payload && payload.ok === false ? 500 : 200, payload);
     return;
   }
