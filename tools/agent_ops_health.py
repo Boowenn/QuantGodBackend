@@ -9,14 +9,14 @@ try:
     from daily_autopilot_v2.orchestrator import read_latest_run
     from daily_autopilot_v2.report import build_daily_autopilot_v2
     from autonomous_lifecycle.polymarket_shadow_lane import build_polymarket_shadow_lane
-    from usdjpy_evidence_os.io_utils import read_jsonl_tail, utc_now_iso, write_json
+    from usdjpy_evidence_os.io_utils import load_json, read_jsonl_tail, utc_now_iso, write_json
     from usdjpy_evidence_os.schema import SAFETY_BOUNDARY, gateway_ledger_path, gateway_queue_path
     from usdjpy_evidence_os.telegram_gateway import gateway_status
 except ModuleNotFoundError:  # pragma: no cover - package import path when run from tests
     from tools.daily_autopilot_v2.orchestrator import read_latest_run
     from tools.daily_autopilot_v2.report import build_daily_autopilot_v2
     from tools.autonomous_lifecycle.polymarket_shadow_lane import build_polymarket_shadow_lane
-    from tools.usdjpy_evidence_os.io_utils import read_jsonl_tail, utc_now_iso, write_json
+    from tools.usdjpy_evidence_os.io_utils import load_json, read_jsonl_tail, utc_now_iso, write_json
     from tools.usdjpy_evidence_os.schema import SAFETY_BOUNDARY, gateway_ledger_path, gateway_queue_path
     from tools.usdjpy_evidence_os.telegram_gateway import gateway_status
 
@@ -24,6 +24,8 @@ except ModuleNotFoundError:  # pragma: no cover - package import path when run f
 SCHEMA = "quantgod.agent_ops_health.v1"
 AGENT_VERSION = "v2.6-agent-ops-health"
 OUTPUT_FILE = Path("agent") / "QuantGod_AgentOpsHealth.json"
+AGENT_LOOP_STATUS_FILE = Path("agent") / "QuantGod_AgentV25LoopStatus.json"
+AGENT_LOOP_SUPERVISOR_FILE = Path("agent") / "QuantGod_AgentV25SupervisorStatus.json"
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -155,6 +157,47 @@ def _daily_autopilot_health(runtime_dir: Path, repo_root: Path) -> Dict[str, Any
     }
 
 
+def _agent_loop_health(runtime_dir: Path) -> Dict[str, Any]:
+    loop_status = load_json(runtime_dir / AGENT_LOOP_STATUS_FILE)
+    supervisor_status = load_json(runtime_dir / AGENT_LOOP_SUPERVISOR_FILE)
+    interval = _as_int(loop_status.get("intervalSeconds") or os.environ.get("QG_AGENT_V25_INTERVAL_SECONDS"), 300)
+    stale_after = _as_int(os.environ.get("QG_AGENT_V25_STALE_SECONDS"), max(900, interval * 4))
+    last_heartbeat = loop_status.get("lastHeartbeatAtIso") or loop_status.get("generatedAtIso")
+    age_seconds = _age_seconds(last_heartbeat)
+    screen_name = loop_status.get("screenName") or supervisor_status.get("screenName") or "quantgod-agent-v25"
+    status = "PASS"
+    detail = "Agent v2.5 后台循环在线，Telegram Gateway 会按调度收集并投递。"
+    if not loop_status:
+        status = "WARN"
+        detail = "尚未看到 Agent v2.5 后台循环心跳；请运行 ensure_mac_agent_v25_loop。"
+    elif age_seconds is None:
+        status = "WARN"
+        detail = "Agent v2.5 后台循环心跳时间无法解析。"
+    elif age_seconds > stale_after:
+        status = "BLOCKED"
+        detail = f"Agent v2.5 后台循环心跳已超过 {int(age_seconds)} 秒，自动推送可能中断。"
+    elif str(loop_status.get("status") or "").upper() not in {"RUNNING", "COMPLETED"}:
+        status = "WARN"
+        detail = f"Agent v2.5 后台循环状态：{loop_status.get('status') or 'UNKNOWN'}"
+    return {
+        "status": status,
+        "statusZh": _status_zh(status),
+        "screenName": screen_name,
+        "mode": loop_status.get("mode") or "loop",
+        "pid": loop_status.get("pid"),
+        "runtimeDir": loop_status.get("runtimeDir") or str(runtime_dir),
+        "lastHeartbeatAtIso": last_heartbeat,
+        "lastHeartbeatAgeSeconds": age_seconds,
+        "staleAfterSeconds": stale_after,
+        "intervalSeconds": interval,
+        "sendTelegram": bool(loop_status.get("sendTelegram")),
+        "supervisorAction": supervisor_status.get("action"),
+        "supervisorReasonZh": supervisor_status.get("reasonZh"),
+        "supervisorGeneratedAtIso": supervisor_status.get("generatedAtIso"),
+        "detailZh": detail,
+    }
+
+
 def _polymarket_health(runtime_dir: Path) -> Dict[str, Any]:
     lane = build_polymarket_shadow_lane(runtime_dir, write=False)
     summary = lane.get("summary") if isinstance(lane.get("summary"), dict) else {}
@@ -198,6 +241,8 @@ def _telegram_health(runtime_dir: Path) -> Dict[str, Any]:
     delivered_count = _as_int(status_payload.get("deliveredCount"), 0)
     push_allowed = bool(status_payload.get("pushAllowed"))
     commands_allowed = bool(status_payload.get("commandsAllowed"))
+    latest_reason = str(latest.get("deliveryReason") or "")
+    latest_ok = bool(latest.get("deliveryOk")) or latest_reason == "duplicate_suppressed"
     status = "PASS"
     detail = "Telegram Gateway 已启用 push-only 投递。"
     if commands_allowed:
@@ -209,9 +254,11 @@ def _telegram_health(runtime_dir: Path) -> Dict[str, Any]:
     elif pending_count > 0 and delivered_count == 0:
         status = "WARN"
         detail = "Telegram 队列有待投递消息，尚未看到成功投递。"
-    elif latest and not latest.get("deliveryOk"):
+    elif latest and not latest_ok:
         status = "WARN"
-        detail = f"最近 Telegram 投递未成功：{latest.get('deliveryReason') or '等待下一轮'}"
+        detail = f"最近 Telegram 投递未成功：{latest_reason or '等待下一轮'}"
+    elif latest_reason == "duplicate_suppressed":
+        detail = "Telegram Gateway 已启用 push-only 投递；重复报告已自动去重。"
     return {
         "status": status,
         "statusZh": _status_zh(status),
@@ -223,8 +270,8 @@ def _telegram_health(runtime_dir: Path) -> Dict[str, Any]:
         "commandsAllowed": commands_allowed,
         "lastTopic": latest.get("topic") or status_payload.get("lastTopic"),
         "lastEventId": latest.get("eventId") or status_payload.get("lastEventId"),
-        "lastDeliveryOk": latest.get("deliveryOk"),
-        "lastDeliveryReason": latest.get("deliveryReason"),
+        "lastDeliveryOk": latest_ok if latest else None,
+        "lastDeliveryReason": latest_reason or None,
         "lastDeliveryAtIso": latest.get("sentAtIso"),
         "detailZh": detail,
     }
@@ -233,10 +280,12 @@ def _telegram_health(runtime_dir: Path) -> Dict[str, Any]:
 def build_agent_ops_health(runtime_dir: Path, repo_root: Path | None = None, write: bool = False) -> Dict[str, Any]:
     runtime_dir = Path(runtime_dir)
     repo_root = Path(repo_root) if repo_root else Path(__file__).resolve().parents[1]
+    agent_loop = _agent_loop_health(runtime_dir)
     daily = _daily_autopilot_health(runtime_dir, repo_root)
     polymarket = _polymarket_health(runtime_dir)
     telegram = _telegram_health(runtime_dir)
     checks = [
+        _check("agentV25Loop", "Agent v2.5 后台循环", agent_loop["status"], agent_loop["detailZh"], agent_loop.get("lastHeartbeatAgeSeconds")),
         _check("dailyAutopilot", "Daily Autopilot", daily["status"], daily["detailZh"], daily.get("lastRunAgeSeconds")),
         _check("polymarketRetune", "Polymarket 跟单重调", polymarket["status"], polymarket["detailZh"], polymarket.get("todoCount")),
         _check("telegramGateway", "Telegram Gateway", telegram["status"], telegram["detailZh"], telegram.get("pendingCount")),
@@ -251,6 +300,7 @@ def build_agent_ops_health(runtime_dir: Path, repo_root: Path | None = None, wri
         "overallStatus": overall,
         "overallStatusZh": _status_zh(overall),
         "ok": overall != "BLOCKED",
+        "agentV25Loop": agent_loop,
         "dailyAutopilot": daily,
         "polymarketRetune": polymarket,
         "telegramGateway": telegram,

@@ -255,6 +255,7 @@ class DailyAutopilotTests(unittest.TestCase):
                 "-n",
                 "tools/run_mac_daily_autopilot.sh",
                 "tools/run_mac_agent_v25_loop.sh",
+                "tools/ensure_mac_agent_v25_loop.sh",
                 "tools/run_mac_usdjpy_history_sync_loop.sh",
                 "tools/run_mac_polymarket_readonly_cycle.sh",
             ],
@@ -279,6 +280,17 @@ class DailyAutopilotTests(unittest.TestCase):
         self.assertIn("--symbols USDJPYc", agent_loop)
         self.assertIn("QG_AGENT_V25_INTERVAL_SECONDS", agent_loop)
         self.assertIn("QG_TELEGRAM_COMMANDS_ALLOWED", agent_loop)
+        self.assertIn("QuantGod_AgentV25LoopStatus.json", agent_loop)
+
+        supervisor = (repo_root / "tools" / "ensure_mac_agent_v25_loop.sh").read_text(encoding="utf-8")
+        self.assertIn("QuantGod_AgentV25LoopStatus.json", supervisor)
+        self.assertIn("QuantGod_AgentV25SupervisorStatus.json", supervisor)
+        self.assertIn("QG_AGENT_V25_STALE_SECONDS", supervisor)
+        self.assertIn("run_mac_agent_v25_loop.sh --loop", supervisor)
+
+        launcher = (repo_root / "Start_QuantGod_mac.sh").read_text(encoding="utf-8")
+        self.assertIn("quantgod-agent-v25-supervisor", launcher)
+        self.assertIn("tools/ensure_mac_agent_v25_loop.sh --loop", launcher)
 
     def test_mac_history_sync_wrapper_uses_mt5_python_and_terminal_path(self):
         repo_root = MODULE_PATH.parents[1]

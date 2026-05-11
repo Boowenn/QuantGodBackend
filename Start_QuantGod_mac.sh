@@ -176,6 +176,7 @@ MT5_LIVE_SCREEN="${QG_MT5_LIVE_SCREEN:-quantgod-mt5-live}"
 BACKEND_API_SCREEN="${QG_BACKEND_API_SCREEN:-quantgod-backend-api}"
 FRONTEND_SCREEN="${QG_FRONTEND_SCREEN:-quantgod-frontend-dev}"
 AGENT_V25_SCREEN="${QG_AGENT_V25_SCREEN:-quantgod-agent-v25}"
+AGENT_V25_SUPERVISOR_SCREEN="${QG_AGENT_V25_SUPERVISOR_SCREEN:-quantgod-agent-v25-supervisor}"
 HISTORY_SYNC_SCREEN="${QG_USDJPY_HISTORY_SYNC_SCREEN:-quantgod-usdjpy-history-sync}"
 LEGACY_DAILY_AUTOPILOT_SCREEN="${QG_DAILY_AUTOPILOT_SCREEN:-quantgod-daily-autopilot}"
 
@@ -306,8 +307,8 @@ fi
 
 if [[ "$AGENT_V25_ENABLED" == "1" ]]; then
   quit_screen "$LEGACY_DAILY_AUTOPILOT_SCREEN"
-  start_screen "$AGENT_V25_SCREEN" "$SCRIPT_DIR/runtime/agent_v25_screen.log" \
-    "cd '$SCRIPT_DIR' && exec bash tools/run_mac_agent_v25_loop.sh --loop"
+  start_screen "$AGENT_V25_SUPERVISOR_SCREEN" "$SCRIPT_DIR/runtime/agent_v25_supervisor_screen.log" \
+    "cd '$SCRIPT_DIR' && exec bash tools/ensure_mac_agent_v25_loop.sh --loop"
 fi
 
 if [[ "$QG_USDJPY_HISTORY_SYNC_ENABLED" == "1" ]]; then
@@ -324,4 +325,4 @@ open "http://$QG_FRONTEND_HOST:$QG_FRONTEND_PORT/vue/?workspace=mt5" || \
   open "http://$QG_DASHBOARD_HOST:$QG_DASHBOARD_PORT/vue/?workspace=mt5" || true
 
 echo "QuantGod v2.5 launcher complete."
-echo "Screens: $BACKEND_API_SCREEN, $FRONTEND_SCREEN, $AGENT_V25_SCREEN, $HISTORY_SYNC_SCREEN, $MT5_LIVE_SCREEN"
+echo "Screens: $BACKEND_API_SCREEN, $FRONTEND_SCREEN, $AGENT_V25_SUPERVISOR_SCREEN, $AGENT_V25_SCREEN, $HISTORY_SYNC_SCREEN, $MT5_LIVE_SCREEN"

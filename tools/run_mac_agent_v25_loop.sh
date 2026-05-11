@@ -38,6 +38,7 @@ export QG_TELEGRAM_COMMANDS_ALLOWED="${QG_TELEGRAM_COMMANDS_ALLOWED:-0}"
 PYTHON_BIN="${QG_PYTHON_BIN:-python3}"
 INTERVAL_SECONDS="${QG_AGENT_V25_INTERVAL_SECONDS:-300}"
 SEND_TELEGRAM="${QG_AGENT_V25_SEND_TELEGRAM:-${QG_TELEGRAM_PUSH_ALLOWED:-0}}"
+SCREEN_NAME="${QG_AGENT_V25_SCREEN:-quantgod-agent-v25}"
 
 default_mt5_files_dir() {
   printf '%s\n' "$HOME/Library/Application Support/net.metaquotes.wine.metatrader5/drive_c/Program Files/MetaTrader 5/MQL5/Files"
@@ -61,6 +62,55 @@ RUNTIME_DIR="$(resolve_runtime_dir)"
 export QG_RUNTIME_DIR="${QG_RUNTIME_DIR:-$RUNTIME_DIR}"
 export QG_MT5_FILES_DIR="${QG_MT5_FILES_DIR:-$RUNTIME_DIR}"
 
+write_loop_status() {
+  local status="$1"
+  local detail="$2"
+  "$PYTHON_BIN" - "$RUNTIME_DIR" "$REPO_ROOT" "$status" "$detail" "$MODE" "$INTERVAL_SECONDS" "$SEND_TELEGRAM" "$SCREEN_NAME" "$$" <<'PY' || true
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+runtime_dir = Path(sys.argv[1])
+repo_root = sys.argv[2]
+status = sys.argv[3]
+detail = sys.argv[4]
+mode = sys.argv[5]
+interval_seconds = int(sys.argv[6])
+send_telegram = sys.argv[7] == "1"
+screen_name = sys.argv[8]
+pid = int(sys.argv[9])
+now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+payload = {
+    "schema": "quantgod.agent_v25_loop_status.v1",
+    "generatedAtIso": now,
+    "lastHeartbeatAtIso": now,
+    "status": status,
+    "statusZh": "后台循环运行中" if status in {"RUNNING", "COMPLETED"} else "后台循环需要观察",
+    "detailZh": detail,
+    "mode": mode.lstrip("-"),
+    "pid": pid,
+    "screenName": screen_name,
+    "runtimeDir": str(runtime_dir),
+    "repoRoot": repo_root,
+    "intervalSeconds": interval_seconds,
+    "sendTelegram": send_telegram,
+    "pushOnly": True,
+    "commandsAllowed": False,
+    "safety": {
+        "orderSendAllowed": False,
+        "closeAllowed": False,
+        "cancelAllowed": False,
+        "livePresetMutationAllowed": False,
+        "telegramCommandsAllowed": False,
+    },
+}
+target = runtime_dir / "agent" / "QuantGod_AgentV25LoopStatus.json"
+target.parent.mkdir(parents=True, exist_ok=True)
+target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
 MODE="--loop"
 if [[ "${1:-}" == "--once" ]]; then
   MODE="--once"
@@ -71,6 +121,7 @@ elif [[ "${1:-}" == "--loop" ]]; then
 fi
 
 run_once() {
+  write_loop_status "RUNNING" "Agent v2.5 后台循环开始执行。"
   echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] QuantGod Agent v2.5 cycle start"
 
   "$PYTHON_BIN" tools/run_automation_chain.py \
@@ -121,6 +172,7 @@ run_once() {
   fi
 
   echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] QuantGod Agent v2.5 cycle complete"
+  write_loop_status "COMPLETED" "Agent v2.5 后台循环已完成一轮，等待下一次调度。"
 }
 
 if [[ "$MODE" == "--once" ]]; then

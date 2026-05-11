@@ -1,8 +1,11 @@
+import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
+from tools.agent_ops_health import build_agent_ops_health
 from tools.strategy_ga.fitness import score_seed
 from tools.strategy_ga.seed_generator import case_memory_seed_pool
 from tools.strategy_json.schema import base_strategy_seed
@@ -20,6 +23,52 @@ from tools.usdjpy_strategy_backtest.report import ingest_klines, run_backtest
 
 
 class USDJPYEvidenceOSTests(unittest.TestCase):
+    def test_agent_ops_health_reports_agent_loop_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            missing = build_agent_ops_health(runtime_dir, repo_root=Path(__file__).resolve().parents[1], write=False)
+            self.assertEqual(missing["agentV25Loop"]["status"], "WARN")
+
+            heartbeat_dir = runtime_dir / "agent"
+            heartbeat_dir.mkdir(parents=True)
+            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            (heartbeat_dir / "QuantGod_AgentV25LoopStatus.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "quantgod.agent_v25_loop_status.v1",
+                        "generatedAtIso": now,
+                        "lastHeartbeatAtIso": now,
+                        "status": "COMPLETED",
+                        "screenName": "quantgod-agent-v25",
+                        "runtimeDir": str(runtime_dir),
+                        "intervalSeconds": 300,
+                        "sendTelegram": True,
+                        "commandsAllowed": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (heartbeat_dir / "QuantGod_AgentV25SupervisorStatus.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "quantgod.agent_v25_supervisor_status.v1",
+                        "generatedAtIso": now,
+                        "action": "NOOP",
+                        "reasonZh": "Agent v2.5 后台循环在线，心跳新鲜。",
+                        "screenName": "quantgod-agent-v25",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            healthy = build_agent_ops_health(runtime_dir, repo_root=Path(__file__).resolve().parents[1], write=True)
+            self.assertEqual(healthy["agentV25Loop"]["status"], "PASS", healthy["agentV25Loop"])
+            self.assertEqual(healthy["agentV25Loop"]["supervisorAction"], "NOOP")
+            self.assertEqual(healthy["checks"][0]["key"], "agentV25Loop")
+            self.assertTrue((runtime_dir / "agent" / "QuantGod_AgentOpsHealth.json").exists())
+
     def test_execution_feedback_reads_live_mt5_files_dir_when_runtime_is_repo_local(self):
         old_mt5_files_dir = os.environ.get("QG_MT5_FILES_DIR")
         try:

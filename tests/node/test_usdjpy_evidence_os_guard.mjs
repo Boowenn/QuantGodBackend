@@ -38,6 +38,8 @@ test('evidence OS remains read-only and feeds GA scoring', () => {
     read('tools/agent_ops_health.py'),
     read('tools/run_telegram_gateway.py'),
     read('tools/run_agent_ops_health.py'),
+    read('tools/run_mac_agent_v25_loop.sh'),
+    read('tools/ensure_mac_agent_v25_loop.sh'),
     read('tools/strategy_ga/fitness.py'),
   ].join('\n');
 
@@ -72,6 +74,13 @@ test('evidence OS remains read-only and feeds GA scoring', () => {
   assert.match(source, /gateway_status/);
   assert.match(source, /quantgod\.agent_ops_health\.v1/);
   assert.match(source, /QuantGod_AgentOpsHealth\.json/);
+  assert.match(source, /QuantGod_AgentV25LoopStatus\.json/);
+  assert.match(source, /QuantGod_AgentV25SupervisorStatus\.json/);
+  assert.match(source, /quantgod\.agent_v25_loop_status\.v1/);
+  assert.match(source, /quantgod\.agent_v25_supervisor_status\.v1/);
+  assert.match(source, /agentV25Loop/);
+  assert.match(source, /QG_AGENT_V25_STALE_SECONDS/);
+  assert.match(source, /QG_AGENT_V25_SUPERVISOR_INTERVAL_SECONDS/);
   assert.match(source, /polymarketRetune/);
   assert.match(source, /telegramGateway/);
   assert.match(source, /dailyAutopilot/);
@@ -85,11 +94,22 @@ test('evidence OS remains read-only and feeds GA scoring', () => {
 });
 
 test('Mac Agent loop sends scheduled reports through the Telegram Gateway collector', () => {
-  const source = read('tools/run_mac_agent_v25_loop.sh');
+  const source = [
+    read('tools/run_mac_agent_v25_loop.sh'),
+    read('tools/ensure_mac_agent_v25_loop.sh'),
+    read('Start_QuantGod_mac.sh'),
+  ].join('\n');
   assert.match(source, /run_telegram_gateway\.py/);
   assert.match(source, /run-once/);
   assert.match(source, /collect/);
   assert.match(source, /--refresh/);
+  assert.match(source, /write_loop_status/);
+  assert.match(source, /QuantGod_AgentV25LoopStatus\.json/);
+  assert.match(source, /QuantGod_AgentV25SupervisorStatus\.json/);
+  assert.match(source, /quantgod-agent-v25-supervisor/);
+  assert.match(source, /ensure_mac_agent_v25_loop\.sh --loop/);
+  assert.match(source, /matching_screen_sessions/);
+  assert.match(source, /screen -S "\$session" -X quit/);
   assert.doesNotMatch(source, /run_daily_autopilot_v2\.py[\s\S]*telegram-text[\s\S]*--send/);
 });
 
