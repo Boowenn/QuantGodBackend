@@ -105,19 +105,19 @@ run_once() {
     --write || echo "Daily Autopilot v2.5 build failed"
 
   if [[ "$SEND_TELEGRAM" == "1" ]]; then
-    "$PYTHON_BIN" tools/run_daily_autopilot_v2.py \
-      --runtime-dir "$RUNTIME_DIR" \
-      --repo-root "$REPO_ROOT" \
-      telegram-text \
-      --refresh \
-      --write \
-      --send || echo "Daily Autopilot v2.5 Telegram push failed"
-
     "$PYTHON_BIN" tools/run_telegram_gateway.py \
       --runtime-dir "$RUNTIME_DIR" \
-      dispatch \
+      --repo-root "$REPO_ROOT" \
+      run-once \
+      --refresh \
       --send \
       --limit 8 || echo "Telegram Gateway queued dispatch failed"
+  else
+    "$PYTHON_BIN" tools/run_telegram_gateway.py \
+      --runtime-dir "$RUNTIME_DIR" \
+      --repo-root "$REPO_ROOT" \
+      collect \
+      --refresh || echo "Telegram Gateway scheduled collect failed"
   fi
 
   echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] QuantGod Agent v2.5 cycle complete"

@@ -9,7 +9,13 @@ from tools.strategy_json.schema import base_strategy_seed
 from tools.usdjpy_evidence_os.execution_feedback import build_execution_feedback
 from tools.usdjpy_evidence_os.parity import build_parity_report
 from tools.usdjpy_evidence_os.report import build_evidence_os
-from tools.usdjpy_evidence_os.telegram_gateway import build_notification_event, dispatch_pending, enqueue_event, gateway_status
+from tools.usdjpy_evidence_os.telegram_gateway import (
+    build_notification_event,
+    collect_scheduled_events,
+    dispatch_pending,
+    enqueue_event,
+    gateway_status,
+)
 from tools.usdjpy_strategy_backtest.report import ingest_klines, run_backtest
 
 
@@ -642,6 +648,49 @@ class USDJPYEvidenceOSTests(unittest.TestCase):
             self.assertGreaterEqual(status["ledgerCount"], 1)
             self.assertFalse(status["commandsAllowed"])
             self.assertTrue((runtime_dir / "notifications" / "QuantGod_TelegramGatewayLedger.jsonl").exists())
+
+    def test_telegram_gateway_collects_scheduled_operator_reports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            (runtime_dir / "QuantGod_PolymarketRetunePlanner.json").write_text(
+                """
+                {
+                  "status": "OK",
+                  "decision": "SHADOW_ONLY_RETUNE_NO_BETTING",
+                  "recommendationCounts": {"red": 1, "yellow": 2, "green": 0, "gray": 0},
+                  "copyTradingReview": {
+                    "status": "COPY_TRADING_RETUNE_REQUIRED",
+                    "agentRetuneStatus": "COMPLETED_BY_AGENT",
+                    "operatorStatusLabel": "仍在隔离",
+                    "completedByAgent": true,
+                    "autoAppliedByAgent": true,
+                    "summary": "跟单策略已由 Agent 自动生成 retune plan；继续 shadow-only。",
+                    "bestMetrics": {"source": "sports", "closed": 179, "profitFactor": 0.9821, "winRatePct": 49.72},
+                    "capitalSimulation": {"cashScaledUSDC": "-$0.06", "ledgerNetUSDC": "-$4.23"},
+                    "nextActions": ["继续模拟重调，不连接真实钱包"]
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            status = collect_scheduled_events(runtime_dir, repo_root=Path(__file__).resolve().parents[1], refresh=True)
+
+            self.assertTrue(status["scheduledCollector"])
+            topics = {row.get("topic") for row in status["collectedEvents"]}
+            self.assertIn("DAILY_AUTOPILOT_V2_REPORT", topics)
+            self.assertIn("GA_EVOLUTION_REPORT", topics)
+            self.assertIn("USDJPY_AUTONOMOUS_AGENT_REPORT", topics)
+            self.assertIn("POLYMARKET_RETUNE_REPORT", topics)
+            queued_status = gateway_status(runtime_dir)
+            self.assertGreaterEqual(queued_status["queuedCount"], 4)
+            self.assertGreaterEqual(queued_status["pendingCount"], 4)
+            queue_text = (runtime_dir / "notifications" / "QuantGod_NotificationEventQueue.jsonl").read_text(encoding="utf-8")
+            self.assertIn("POLYMARKET_RETUNE_REPORT", queue_text)
+            self.assertIn("不连接真实钱包", queue_text)
+            second = collect_scheduled_events(runtime_dir, repo_root=Path(__file__).resolve().parents[1], refresh=True)
+            queued_again = sum(int(row.get("queued") or 0) for row in second["collectedEvents"])
+            self.assertEqual(queued_again, 0)
 
     def test_ga_fitness_consumes_parity_execution_and_case_memory(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -63,6 +63,11 @@ test('evidence OS remains read-only and feeds GA scoring', () => {
   assert.match(source, /genericAdapterStableFamilies/);
   assert.match(source, /QuantGod_TelegramGatewayLedger\.jsonl/);
   assert.match(source, /QuantGod_NotificationEventQueue\.jsonl/);
+  assert.match(source, /collect_scheduled_events/);
+  assert.match(source, /DAILY_AUTOPILOT_V2_REPORT/);
+  assert.match(source, /GA_EVOLUTION_REPORT/);
+  assert.match(source, /USDJPY_AUTONOMOUS_AGENT_REPORT/);
+  assert.match(source, /POLYMARKET_RETUNE_REPORT/);
   assert.match(source, /dispatch_pending/);
   assert.match(source, /gateway_status/);
   assert.match(source, /quantgod\.agent_ops_health\.v1/);
@@ -73,9 +78,19 @@ test('evidence OS remains read-only and feeds GA scoring', () => {
   assert.match(source, /QG_AGENT_V25_INTERVAL_SECONDS/);
   assert.match(source, /QG_TELEGRAM_COMMANDS_ALLOWED/);
   assert.match(source, /rate_limited/);
+  assert.match(source, /run-once/);
   assert.match(source, /PARITY_OR_EXECUTION_EVIDENCE_FAILED/);
   assert.doesNotMatch(source, /TRADE_ACTION_DEAL|OrderSendAsync|PositionClose|CTrade/);
   assert.doesNotMatch(source, /telegramCommandExecutionAllowed["']?\s*:\s*True/);
+});
+
+test('Mac Agent loop sends scheduled reports through the Telegram Gateway collector', () => {
+  const source = read('tools/run_mac_agent_v25_loop.sh');
+  assert.match(source, /run_telegram_gateway\.py/);
+  assert.match(source, /run-once/);
+  assert.match(source, /collect/);
+  assert.match(source, /--refresh/);
+  assert.doesNotMatch(source, /run_daily_autopilot_v2\.py[\s\S]*telegram-text[\s\S]*--send/);
 });
 
 test('MT5 EA emits standardized live execution feedback for Evidence OS', () => {
