@@ -22,6 +22,7 @@ test('USDJPY evidence OS API endpoints are exposed under USDJPY namespace', () =
     '/api/usdjpy-strategy-lab/telegram-gateway/status',
     '/api/usdjpy-strategy-lab/telegram-gateway/test-event',
     '/api/usdjpy-strategy-lab/telegram-gateway/dispatch',
+    '/api/usdjpy-strategy-lab/agent-ops-health/status',
   ]) {
     assert.match(routes, new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
@@ -34,7 +35,9 @@ test('evidence OS remains read-only and feeds GA scoring', () => {
     read('tools/usdjpy_evidence_os/execution_feedback.py'),
     read('tools/usdjpy_evidence_os/case_memory.py'),
     read('tools/usdjpy_evidence_os/telegram_gateway.py'),
+    read('tools/agent_ops_health.py'),
     read('tools/run_telegram_gateway.py'),
+    read('tools/run_agent_ops_health.py'),
     read('tools/strategy_ga/fitness.py'),
   ].join('\n');
 
@@ -62,6 +65,13 @@ test('evidence OS remains read-only and feeds GA scoring', () => {
   assert.match(source, /QuantGod_NotificationEventQueue\.jsonl/);
   assert.match(source, /dispatch_pending/);
   assert.match(source, /gateway_status/);
+  assert.match(source, /quantgod\.agent_ops_health\.v1/);
+  assert.match(source, /QuantGod_AgentOpsHealth\.json/);
+  assert.match(source, /polymarketRetune/);
+  assert.match(source, /telegramGateway/);
+  assert.match(source, /dailyAutopilot/);
+  assert.match(source, /QG_AGENT_V25_INTERVAL_SECONDS/);
+  assert.match(source, /QG_TELEGRAM_COMMANDS_ALLOWED/);
   assert.match(source, /rate_limited/);
   assert.match(source, /PARITY_OR_EXECUTION_EVIDENCE_FAILED/);
   assert.doesNotMatch(source, /TRADE_ACTION_DEAL|OrderSendAsync|PositionClose|CTrade/);

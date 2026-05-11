@@ -603,6 +603,16 @@ async function handle(req, res, ctx) {
     sendJson(res, payload && payload.ok === false ? 500 : 200, payload);
     return;
   }
+  if (
+    req.method === 'GET' &&
+    (pathname === '/api/usdjpy-strategy-lab/agent-ops-health' || pathname === '/api/usdjpy-strategy-lab/agent-ops-health/status')
+  ) {
+    const args = ['--runtime-dir', runtimeDir, '--repo-root', ctx.repoRoot, 'status'];
+    if (url.searchParams.get('write') === '1' || url.searchParams.get('refresh') === '1') args.push('--write');
+    const payload = await runPythonJson(ctx.repoRoot, args, 45000, 'run_agent_ops_health.py');
+    sendJson(res, payload && payload.ok === false ? 500 : 200, payload);
+    return;
+  }
   if (req.method === 'GET' && (pathname === '/api/usdjpy-strategy-lab/ga' || pathname === '/api/usdjpy-strategy-lab/ga/status')) {
     const args = ['--runtime-dir', runtimeDir, 'status'];
     if (url.searchParams.get('write') === '1') args.push('--write');
