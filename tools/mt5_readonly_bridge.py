@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ SAFETY = {
 ENDPOINTS = {"status", "account", "positions", "orders", "symbols", "quote", "snapshot"}
 DEFAULT_SYMBOL_LIMIT = 120
 MAX_SYMBOL_LIMIT = 2000
+DEFAULT_EA_SNAPSHOT_MAX_AGE_SECONDS = 180
 
 
 def utc_now() -> str:
@@ -154,6 +156,44 @@ def read_ea_dashboard_snapshot() -> tuple[dict[str, Any] | None, Path | None, di
     if parse_errors:
         return None, None, {"parseErrors": parse_errors}
     return None, None, None
+
+
+def ea_snapshot_max_age_seconds() -> int:
+    raw = os.environ.get("QG_MT5_EA_SNAPSHOT_MAX_AGE_SECONDS", "")
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        value = DEFAULT_EA_SNAPSHOT_MAX_AGE_SECONDS
+    return max(15, value)
+
+
+def ea_snapshot_age_seconds(stat: os.stat_result | None) -> float | None:
+    if not stat:
+        return None
+    return max(0.0, time.time() - float(stat.st_mtime))
+
+
+def ea_snapshot_fresh(stat: os.stat_result | None) -> bool:
+    age = ea_snapshot_age_seconds(stat)
+    if age is None:
+        return False
+    return age <= ea_snapshot_max_age_seconds()
+
+
+def stale_collection_payload(kind: str, symbol: str, stat: os.stat_result | None) -> dict[str, Any]:
+    age = ea_snapshot_age_seconds(stat)
+    max_age = ea_snapshot_max_age_seconds()
+    return {
+        "count": 0,
+        "symbol": normalize_symbol_filter(symbol),
+        "items": [],
+        "stale": True,
+        "staleSuppressed": True,
+        "kind": kind,
+        "ageSeconds": round(age, 3) if age is not None else None,
+        "maxAgeSeconds": max_age,
+        "reason": "EA snapshot is stale; suppressing openTrades/pendingOrders so old positions are not shown as live.",
+    }
 
 
 def read_usdjpy_rsi_entry_diagnostics() -> tuple[dict[str, Any] | None, Path | None, dict[str, Any] | None]:
@@ -440,27 +480,36 @@ def build_ea_snapshot_fallback(args: argparse.Namespace) -> dict[str, Any] | Non
     endpoint = args.endpoint
     payload = base_payload(endpoint)
     stat = file_path.stat() if file_path else None
+    snapshot_age = ea_snapshot_age_seconds(stat)
+    snapshot_max_age = ea_snapshot_max_age_seconds()
+    snapshot_fresh = ea_snapshot_fresh(stat)
     runtime = dashboard.get("runtime") if isinstance(dashboard.get("runtime"), dict) else {}
     payload.update(
         {
             "mode": "MT5_READONLY_BRIDGE_V1_EA_SNAPSHOT_FALLBACK",
-            "status": "EA_SNAPSHOT",
+            "status": "EA_SNAPSHOT" if snapshot_fresh else "STALE_EA_SNAPSHOT",
             "bridgeStatus": "MT5_PYTHON_UNAVAILABLE_EA_SNAPSHOT_FALLBACK",
             "terminal": ea_terminal_payload(dashboard, file_path),
             "account": ea_account_payload(dashboard),
             "runtime": runtime,
             "watchlist": dashboard.get("watchlist", ""),
             "market": dashboard.get("market", {}),
+            "snapshotFresh": snapshot_fresh,
             "source": {
                 "type": "hfm_ea_dashboard_snapshot",
                 "file": str(file_path) if file_path else "",
                 "mtimeIso": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z")
                 if stat
                 else "",
+                "ageSeconds": round(snapshot_age, 3) if snapshot_age is not None else None,
+                "maxAgeSeconds": snapshot_max_age,
+                "fresh": snapshot_fresh,
                 "readError": read_error,
             },
         }
     )
+    if not snapshot_fresh:
+        payload["warning"] = "ea_snapshot_stale_positions_and_orders_suppressed"
 
     if endpoint == "status":
         return payload
@@ -468,10 +517,18 @@ def build_ea_snapshot_fallback(args: argparse.Namespace) -> dict[str, Any] | Non
         payload["status"] = "CONNECTED" if payload.get("account") else "NO_ACCOUNT"
         return payload
     if endpoint == "positions":
-        payload["positions"] = ea_positions_payload(dashboard, args.symbol)
+        payload["positions"] = (
+            ea_positions_payload(dashboard, args.symbol)
+            if snapshot_fresh
+            else stale_collection_payload("positions", args.symbol, stat)
+        )
         return payload
     if endpoint == "orders":
-        payload["orders"] = ea_orders_payload(dashboard, args.symbol)
+        payload["orders"] = (
+            ea_orders_payload(dashboard, args.symbol)
+            if snapshot_fresh
+            else stale_collection_payload("orders", args.symbol, stat)
+        )
         return payload
     if endpoint == "symbols":
         payload["symbols"] = ea_symbols_payload(dashboard, args.group, args.query, args.limit)
@@ -484,8 +541,16 @@ def build_ea_snapshot_fallback(args: argparse.Namespace) -> dict[str, Any] | Non
             payload["error"] = quote.get("error", "quote unavailable")
         return payload
     if endpoint == "snapshot":
-        payload["positions"] = ea_positions_payload(dashboard, args.symbol)
-        payload["orders"] = ea_orders_payload(dashboard, args.symbol)
+        payload["positions"] = (
+            ea_positions_payload(dashboard, args.symbol)
+            if snapshot_fresh
+            else stale_collection_payload("positions", args.symbol, stat)
+        )
+        payload["orders"] = (
+            ea_orders_payload(dashboard, args.symbol)
+            if snapshot_fresh
+            else stale_collection_payload("orders", args.symbol, stat)
+        )
         payload["symbols"] = ea_symbols_payload(dashboard, args.group, args.query, args.symbols_limit)
         payload["quote"] = ea_quote_payload(dashboard, args.symbol) if args.symbol else None
         merge_usdjpy_rsi_entry_diagnostics(payload, dashboard)

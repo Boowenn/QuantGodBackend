@@ -1,7 +1,9 @@
+import argparse
 import importlib.util
 import json
 import os
 import tempfile
+import time
 import unittest
 from collections import namedtuple
 from pathlib import Path
@@ -350,6 +352,90 @@ class Mt5ReadOnlyBridgeTests(unittest.TestCase):
         self.assertEqual(payload["usdJpyRsiEntryDiagnostics"]["state"], "READY_BUY_SIGNAL")
         self.assertEqual(payload["usdJpyRsiEntryDiagnostics"]["symbol"], "USDJPYc")
         self.assertEqual(payload["usdJpyRsiEntryDiagnosticsSource"]["type"], "standalone_file")
+
+    def write_dashboard_with_trade_state(self, runtime: Path, mtime: float) -> Path:
+        path = runtime / "QuantGod_Dashboard.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "watchlist": "USDJPYc",
+                    "runtime": {"tradeStatus": "READY", "terminalConnected": True},
+                    "account": {"number": 123456, "server": "HFM", "currency": "USC", "balance": 10000},
+                    "market": {"symbol": "USDJPYc", "bid": 157.01, "ask": 157.03},
+                    "openTrades": [
+                        {
+                            "ticket": 621204078,
+                            "positionId": 621204078,
+                            "type": "BUY",
+                            "symbol": "USDJPYc",
+                            "actualLots": 0.01,
+                            "openPrice": 157.144,
+                            "actualProfit": -0.75,
+                        }
+                    ],
+                    "pendingOrders": [{"ticket": 1, "symbol": "USDJPYc", "type": "BUY_LIMIT", "volume": 0.01}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.utime(path, (mtime, mtime))
+        return path
+
+    def fallback_args(self, endpoint: str) -> argparse.Namespace:
+        return argparse.Namespace(endpoint=endpoint, symbol="USDJPYc", group="*", query="", limit=120, symbols_limit=120)
+
+    def test_stale_ea_snapshot_suppresses_positions_and_orders(self):
+        old_runtime = os.environ.get("QG_RUNTIME_DIR")
+        old_max_age = os.environ.get("QG_MT5_EA_SNAPSHOT_MAX_AGE_SECONDS")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runtime = Path(tmp_dir)
+            self.write_dashboard_with_trade_state(runtime, time.time() - 600)
+            os.environ["QG_RUNTIME_DIR"] = tmp_dir
+            os.environ["QG_MT5_EA_SNAPSHOT_MAX_AGE_SECONDS"] = "60"
+            try:
+                positions = bridge.build_ea_snapshot_fallback(self.fallback_args("positions"))
+                snapshot = bridge.build_ea_snapshot_fallback(self.fallback_args("snapshot"))
+            finally:
+                if old_runtime is None:
+                    os.environ.pop("QG_RUNTIME_DIR", None)
+                else:
+                    os.environ["QG_RUNTIME_DIR"] = old_runtime
+                if old_max_age is None:
+                    os.environ.pop("QG_MT5_EA_SNAPSHOT_MAX_AGE_SECONDS", None)
+                else:
+                    os.environ["QG_MT5_EA_SNAPSHOT_MAX_AGE_SECONDS"] = old_max_age
+
+        self.assertEqual(positions["status"], "STALE_EA_SNAPSHOT")
+        self.assertTrue(positions["positions"]["staleSuppressed"])
+        self.assertEqual(positions["positions"]["items"], [])
+        self.assertEqual(snapshot["positions"]["items"], [])
+        self.assertEqual(snapshot["orders"]["items"], [])
+        self.assertEqual(snapshot["warning"], "ea_snapshot_stale_positions_and_orders_suppressed")
+
+    def test_fresh_ea_snapshot_keeps_positions(self):
+        old_runtime = os.environ.get("QG_RUNTIME_DIR")
+        old_max_age = os.environ.get("QG_MT5_EA_SNAPSHOT_MAX_AGE_SECONDS")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runtime = Path(tmp_dir)
+            self.write_dashboard_with_trade_state(runtime, time.time())
+            os.environ["QG_RUNTIME_DIR"] = tmp_dir
+            os.environ["QG_MT5_EA_SNAPSHOT_MAX_AGE_SECONDS"] = "60"
+            try:
+                positions = bridge.build_ea_snapshot_fallback(self.fallback_args("positions"))
+            finally:
+                if old_runtime is None:
+                    os.environ.pop("QG_RUNTIME_DIR", None)
+                else:
+                    os.environ["QG_RUNTIME_DIR"] = old_runtime
+                if old_max_age is None:
+                    os.environ.pop("QG_MT5_EA_SNAPSHOT_MAX_AGE_SECONDS", None)
+                else:
+                    os.environ["QG_MT5_EA_SNAPSHOT_MAX_AGE_SECONDS"] = old_max_age
+
+        self.assertEqual(positions["status"], "EA_SNAPSHOT")
+        self.assertEqual(positions["positions"]["count"], 1)
+        self.assertEqual(positions["positions"]["items"][0]["ticket"], 621204078)
+        self.assertTrue(positions["source"]["fresh"])
 
 
 if __name__ == "__main__":
