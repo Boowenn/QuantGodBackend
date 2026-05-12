@@ -7,6 +7,7 @@ from pathlib import Path
 
 from tools.case_memory.report import build_case_memory_report
 from tools.run_case_memory import write_sample_runtime
+from tools.strategy_structure_lab.report import build_report as build_strategy_structure_report
 
 
 class CaseMemoryCandidateTests(unittest.TestCase):
@@ -53,6 +54,20 @@ class CaseMemoryCandidateTests(unittest.TestCase):
             self.assertEqual(report["status"], "BLOCKED_BY_PARITY")
             self.assertEqual(report["candidateCount"], 0)
             self.assertTrue(report["parityGate"]["blocked"])
+
+    def test_strategy_structure_lab_wraps_existing_case_memory_without_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = Path(temp)
+            write_sample_runtime(runtime, overwrite=True)
+
+            report = build_strategy_structure_report(runtime, write=True)
+
+            self.assertTrue(report["strategyStructureProduction"])
+            self.assertEqual(report["p4Stage"], "P4-7")
+            self.assertGreaterEqual(report["candidateCount"], 1)
+            self.assertTrue(report["safety"]["strategyStructureProductionOnly"])
+            self.assertFalse(report["safety"]["orderSendAllowed"])
+            self.assertFalse(report["safety"]["livePresetMutationAllowed"])
 
 
 if __name__ == "__main__":

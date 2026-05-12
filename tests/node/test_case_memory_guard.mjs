@@ -9,7 +9,7 @@ function read(rel) {
   return fs.readFileSync(path.join(repo, rel), 'utf8');
 }
 
-test('case memory API and runner expose P4-3 endpoints', () => {
+test('case memory API and runner expose P4-7 productionized endpoints', () => {
   const server = read('Dashboard/dashboard_server.js');
   const routes = read('Dashboard/case_memory_api_routes.js');
   const runner = read('tools/run_case_memory.py');
@@ -33,10 +33,17 @@ test('case memory candidates remain shadow-only and readable', () => {
     'tools/case_memory/builder.py',
     'tools/case_memory/report.py',
     'tools/case_memory/telegram_text.py',
+    'tools/strategy_structure_lab/schema.py',
+    'tools/strategy_structure_lab/candidate_builder.py',
+    'tools/strategy_structure_lab/builder.py',
+    'tools/strategy_structure_lab/report.py',
+    'tools/strategy_structure_lab/telegram_text.py',
     'tools/run_case_memory.py',
   ];
   const source = files.map(read).join('\n');
   for (const marker of [
+    'P4-7',
+    'strategyStructureProductionOnly',
     'SHADOW_STRATEGY_JSON_CANDIDATE',
     'BLOCKED_BY_PARITY',
     'case_memory_seed_pool',

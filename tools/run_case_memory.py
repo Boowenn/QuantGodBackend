@@ -23,7 +23,9 @@ def emit(payload) -> int:
 
 def main(argv=None) -> int:
     root = Path(__file__).resolve().parents[1]
-    parser = argparse.ArgumentParser(description="QuantGod P4-3 Case Memory strategy candidate runner")
+    parser = argparse.ArgumentParser(
+        description="QuantGod P4-7 Case Memory strategy structure production runner"
+    )
     parser.add_argument("--runtime-dir", default=os.environ.get("QG_RUNTIME_DIR", str(root / "runtime")))
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
