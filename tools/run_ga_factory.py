@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Compatibility CLI alias for Strategy JSON GA Factory."""
+
 from __future__ import annotations
 
 import sys

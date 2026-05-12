@@ -1,9 +1,16 @@
+"""Small persistence helpers for GA Factory audit artifacts."""
+
 from __future__ import annotations
 
 import csv
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+)
 
 
 def load_json(path: Path) -> Dict[str, Any]:

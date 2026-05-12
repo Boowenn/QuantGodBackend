@@ -1,6 +1,11 @@
+"""Chinese operator text for GA Factory summaries."""
+
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import (
+    Any,
+    Dict,
+)
 
 
 def ga_factory_to_chinese_text(state: Dict[str, Any]) -> str:

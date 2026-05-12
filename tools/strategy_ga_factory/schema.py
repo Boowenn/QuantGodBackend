@@ -1,7 +1,13 @@
+"""Shared schema constants for the Strategy JSON GA Factory."""
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import (
+    Any,
+    Dict,
+    List,
+)
 
 try:
     from tools.strategy_ga.schema import SAFETY_BOUNDARY, utc_now_iso

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""CLI entrypoint for Strategy JSON GA Factory archive builds."""
+
 from __future__ import annotations
 
 import argparse
@@ -10,11 +12,17 @@ from pathlib import Path
 
 try:
     from tools.strategy_ga.generation_runner import run_generation
-    from tools.strategy_ga_factory.factory_runner import build_factory_state, read_factory_state
+    from tools.strategy_ga_factory.factory_runner import (
+        build_factory_state,
+        read_factory_state,
+    )
     from tools.strategy_ga_factory.telegram_text import ga_factory_to_chinese_text
 except ModuleNotFoundError:  # pragma: no cover
     from strategy_ga.generation_runner import run_generation
-    from strategy_ga_factory.factory_runner import build_factory_state, read_factory_state
+    from strategy_ga_factory.factory_runner import (
+        build_factory_state,
+        read_factory_state,
+    )
     from strategy_ga_factory.telegram_text import ga_factory_to_chinese_text
 
 

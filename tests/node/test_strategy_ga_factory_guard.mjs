@@ -4,6 +4,8 @@ import path from 'node:path';
 import test from 'node:test';
 
 const repo = process.cwd();
+const MIN_READABLE_LINES = 5;
+const MAX_READABLE_LINE_LENGTH = 160;
 
 function read(rel) {
   return fs.readFileSync(path.join(repo, rel), 'utf8');
@@ -18,9 +20,12 @@ function listFiles(relDir) {
 function assertReadableSource(file) {
   const text = read(file);
   const lines = text.split(/\r?\n/);
-  assert.ok(lines.length >= 5, `${file} should stay readable`);
+  assert.ok(lines.length >= MIN_READABLE_LINES, `${file} should stay readable`);
   lines.forEach((line, index) => {
-    assert.ok(line.length <= 160, `${file}:${index + 1} should not exceed 160 characters`);
+    assert.ok(
+      line.length <= MAX_READABLE_LINE_LENGTH,
+      `${file}:${index + 1} should not exceed ${MAX_READABLE_LINE_LENGTH} characters`,
+    );
   });
   if (file.endsWith('.py')) {
     assert.doesNotMatch(text, /;\s*(def|class)\s+/);

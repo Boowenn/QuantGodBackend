@@ -1,3 +1,5 @@
+"""Regression tests for the GA Factory compatibility CLI alias."""
+
 import contextlib
 import io
 import tempfile

@@ -1,7 +1,13 @@
+"""Build GA Factory state from Strategy JSON GA outputs."""
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import (
+    Any,
+    Dict,
+    List,
+)
 
 try:
     from tools.strategy_ga.schema import (
@@ -22,7 +28,13 @@ except ModuleNotFoundError:  # pragma: no cover
         utc_now_iso,
     )
 
-from .archive import append_ledger_row, latest_by_key, load_json, read_jsonl, write_json
+from .archive import (
+    append_ledger_row,
+    latest_by_key,
+    load_json,
+    read_jsonl,
+    write_json,
+)
 from .schema import (
     AGENT_VERSION,
     ALLOWED_PROMOTION_STAGES,
@@ -271,7 +283,7 @@ def _next_generation(
     return {
         "status": "WAITING_GA_TRACE",
         "targetGeneration": 1,
-        "reasonZh": "先运行第一代 Strategy JSON GA，再由工厂归档。"
+        "reasonZh": "先运行第一代 Strategy JSON GA，再由工厂归档。",
     }
 
 

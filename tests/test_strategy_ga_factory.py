@@ -1,9 +1,14 @@
+"""Regression tests for Strategy JSON GA Factory archive creation."""
+
 import tempfile
 import unittest
 from pathlib import Path
 
 from tools.run_strategy_ga_factory import write_sample_runtime
-from tools.strategy_ga_factory.factory_runner import build_factory_state, read_factory_state
+from tools.strategy_ga_factory.factory_runner import (
+    build_factory_state,
+    read_factory_state,
+)
 
 
 class StrategyGAFactoryTests(unittest.TestCase):

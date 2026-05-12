@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 const repo = process.cwd();
+const FORBIDDEN_EXECUTION_PATTERN = /OrderSend|PositionClose|TRADE_ACTION_DEAL|CTrade/;
 
 function read(rel) {
   return fs.readFileSync(path.join(repo, rel), 'utf8');
@@ -23,5 +24,5 @@ test('GA Factory alias routes point at Strategy GA Factory safely', () => {
   ]) {
     assert.match(`${server}\n${routes}\n${runner}`, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
-  assert.doesNotMatch(routes + runner, /OrderSend|PositionClose|TRADE_ACTION_DEAL|CTrade/);
+  assert.doesNotMatch(routes + runner, FORBIDDEN_EXECUTION_PATTERN);
 });
