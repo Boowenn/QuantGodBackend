@@ -29,6 +29,30 @@ def _overall_status(sections: list[dict[str, Any]]) -> str:
     return "PASS"
 
 
+def _next_actions(
+    history: dict[str, Any],
+    parity: dict[str, Any],
+    execution_feedback: dict[str, Any],
+    ga: dict[str, Any],
+) -> list[str]:
+    actions: list[str] = []
+    if parity.get("failCount"):
+        actions.append("优先修复 PARITY_FAIL，相关策略不得晋级")
+    elif parity.get("missingCount"):
+        actions.append("补齐缺失 strategy family parity 覆盖")
+    elif parity.get("shadowResearchOnlyCount"):
+        actions.append("持续观察 shadow-only 策略族的 EA 影子评估证据")
+    if execution_feedback.get("sampleCount", 0) < 5:
+        actions.append("持续收集 live/shadow execution feedback")
+    if ga.get("status") != "PASS":
+        actions.append("连续观察 GA 多代 elite / graveyard / lineage 稳定性")
+    if history.get("status") != "PASS":
+        actions.append("确认 USDJPY 历史数据同步长期 PASS")
+    if not actions:
+        actions.append("生产证据可进入持续观察")
+    return actions
+
+
 def build_report(runtime_dir: Path) -> dict[str, Any]:
     history = audit_history(runtime_dir)
     parity = audit_parity(runtime_dir)
@@ -56,12 +80,7 @@ def build_report(runtime_dir: Path) -> dict[str, Any]:
         "liveExecutionFeedbackCoverage": execution_feedback,
         "gaMultiGenerationStability": ga,
         "safety": SAFETY,
-        "nextActionsZh": [
-            "优先补齐 PARITY_FAIL / 缺失 strategy family",
-            "持续收集 live/shadow execution feedback",
-            "连续观察 GA 多代 elite / graveyard / lineage 稳定性",
-            "确认 USDJPY 历史数据同步长期 PASS",
-        ],
+        "nextActionsZh": _next_actions(history, parity, execution_feedback, ga),
     }
 
 

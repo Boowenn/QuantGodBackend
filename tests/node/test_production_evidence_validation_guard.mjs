@@ -33,3 +33,16 @@ test('P4-6 guard blocks trading verbs and direct wallet semantics', () => {
     assert.equal(joined.includes(forbidden), false, `forbidden token ${forbidden}`);
   }
 });
+
+test('P4-8A parity audit consumes backtest coverage and EA shadow evidence', () => {
+  const text = readFileSync('tools/production_evidence_validation/parity_audit.py', 'utf8');
+  for (const required of [
+    'strategyJsonBacktest',
+    'mql5EaShadowAdapter',
+    'SHADOW_RESEARCH_ONLY',
+    'QuantGod_StrategyJsonEAShadowEvaluationLedger.jsonl',
+    'quantgod.strategy_backtest_coverage_matrix.v1',
+  ]) {
+    assert.ok(text.includes(required), `missing parity matrix marker ${required}`);
+  }
+});

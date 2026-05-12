@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from tools.production_evidence_validation.report import build_report, write_reports
+from tools.production_evidence_validation.schema import REQUIRED_STRATEGY_FAMILIES
 
 
 class ProductionEvidenceValidationTests(unittest.TestCase):
@@ -34,6 +35,69 @@ class ProductionEvidenceValidationTests(unittest.TestCase):
             self.assertTrue(Path(paths["latest"]).exists())
             saved = json.loads(Path(paths["latest"]).read_text(encoding="utf-8"))
             self.assertIn("historyProduction", saved)
+
+    def test_strategy_family_parity_uses_backtest_coverage_matrix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = []
+            for family in REQUIRED_STRATEGY_FAMILIES:
+                for direction in ("LONG", "SHORT"):
+                    rows.append(
+                        {
+                            "strategyFamily": family,
+                            "direction": direction,
+                            "ok": True,
+                            "status": "PASS",
+                            "tradeCount": 0,
+                            "parityVectorPresent": True,
+                        }
+                    )
+
+            report_path = root / "backtest" / "QuantGod_StrategyBacktestReport.json"
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "strategyCoverageMatrix": {
+                            "schema": "quantgod.strategy_backtest_coverage_matrix.v1",
+                            "status": "PASS",
+                            "rows": rows,
+                            "summary": {
+                                "familyCount": len(REQUIRED_STRATEGY_FAMILIES),
+                                "routeCount": len(rows),
+                                "coveredFamilyCount": len(REQUIRED_STRATEGY_FAMILIES),
+                                "okRouteCount": len(rows),
+                                "parityVectorRouteCount": len(rows),
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            parity_dir = root / "parity"
+            parity_dir.mkdir(parents=True, exist_ok=True)
+            (parity_dir / "QuantGod_StrategyParityReport.json").write_text(
+                json.dumps(
+                    {
+                        "families": [
+                            {
+                                "strategyFamily": "RSI_Reversal",
+                                "status": "PARITY_PASS",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_report(root)
+            parity = report["strategyFamilyParity"]
+            statuses = {row["strategyFamily"]: row["parityStatus"] for row in parity["matrix"]}
+            self.assertEqual(parity["missingCount"], 0)
+            self.assertEqual(parity["status"], "PASS")
+            self.assertEqual(statuses["RSI_Reversal"], "PASS")
+            self.assertIn("SHADOW_RESEARCH_ONLY", set(statuses.values()))
 
 
 if __name__ == "__main__":

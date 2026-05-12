@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +25,7 @@ def read_json(path: Path, default: Any = None) -> Any:
 
 def write_json(path: Path, payload: Any) -> None:
     ensure_dir(path.parent)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
 
