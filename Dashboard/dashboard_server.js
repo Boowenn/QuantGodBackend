@@ -11,6 +11,7 @@ const caseMemoryApiRoutes = require('./case_memory_api_routes');
 const strategyGAFactoryApiRoutes = require('./strategy_ga_factory_api_routes');
 const gaFactoryApiRoutes = require('./ga_factory_api_routes');
 const telegramGatewayOpsApiRoutes = require('./telegram_gateway_ops_api_routes');
+const productionEvidenceValidationApiRoutes = require('./production_evidence_validation_api_routes');
 const stateApiRoutes = require('./state_api_routes');
 const os = require('os');
 const { spawn } = require('child_process');
@@ -3386,6 +3387,12 @@ const server = http.createServer((req, res) => {
     gaFactoryApiRoutes
       .handle(req, res, { repoRoot, rootDir, defaultRuntimeDir })
       .catch((error) => gaFactoryApiRoutes.sendError(res, 500, requestUrl, error));
+    return;
+  }
+  if (productionEvidenceValidationApiRoutes.isProductionEvidenceValidationPath(requestUrl)) {
+    productionEvidenceValidationApiRoutes
+      .handle(req, res, { repoRoot, rootDir, defaultRuntimeDir })
+      .catch((error) => productionEvidenceValidationApiRoutes.sendError(res, 500, requestUrl, error));
     return;
   }
   if (telegramGatewayOpsApiRoutes.isTelegramGatewayOpsPath(requestUrl)) {
