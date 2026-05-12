@@ -45,6 +45,7 @@ test('Telegram Gateway Ops Python sources stay readable', () => {
     'tools/telegram_gateway_ops/status.py',
     'tools/telegram_gateway_ops/telegram_text.py',
     'tests/test_telegram_gateway_ops.py',
+    'tests/node/test_telegram_gateway_ops_guard.mjs',
   ]) {
     readable(rel);
   }
