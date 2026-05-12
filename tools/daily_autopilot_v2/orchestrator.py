@@ -141,6 +141,30 @@ def _build_steps(runtime_dir: Path, repo_root: Path, *, bootstrap_samples: bool)
             "timeoutSeconds": 180,
         },
         {
+            "id": "strategy_parity",
+            "lane": "LIVE",
+            "action": "RUN_STRATEGY_REPLAY_EA_PARITY",
+            "summaryZh": "运行 Strategy JSON / Python Replay / MQL5 EA 一致性校验。",
+            "command": [py, "tools/run_strategy_parity.py", *runtime_arg, "build", "--write"],
+            "timeoutSeconds": 180,
+        },
+        {
+            "id": "live_execution_feedback",
+            "lane": "LIVE",
+            "action": "RUN_LIVE_EXECUTION_FEEDBACK_SUMMARY",
+            "summaryZh": "汇总 EA shadow/live 执行反馈：滑点、延迟、点差、退出质量和 R 倍数。",
+            "command": [py, "tools/run_live_execution_feedback.py", *runtime_arg, "build", "--write"],
+            "timeoutSeconds": 180,
+        },
+        {
+            "id": "evidence_os",
+            "lane": "LIVE",
+            "action": "RUN_PARITY_AND_EXECUTION_FEEDBACK",
+            "summaryZh": "运行 parity、执行反馈和 Case Memory 审计；失败证据会阻断晋级。",
+            "command": [py, "tools/run_usdjpy_evidence_os.py", *runtime_arg, "once", "--write"],
+            "timeoutSeconds": 180,
+        },
+        {
             "id": "walk_forward",
             "lane": "MT5_SHADOW",
             "action": "RUN_WALK_FORWARD",
@@ -154,14 +178,6 @@ def _build_steps(runtime_dir: Path, repo_root: Path, *, bootstrap_samples: bool)
             "action": "RUN_GA_GENERATION",
             "summaryZh": "运行 Strategy JSON GA generation 并写全过程 trace。",
             "command": [py, "tools/run_strategy_ga.py", *runtime_arg, "run-generation", "--write"],
-            "timeoutSeconds": 180,
-        },
-        {
-            "id": "evidence_os",
-            "lane": "LIVE",
-            "action": "RUN_PARITY_AND_EXECUTION_FEEDBACK",
-            "summaryZh": "运行 parity、执行反馈和 Case Memory 审计。",
-            "command": [py, "tools/run_usdjpy_evidence_os.py", *runtime_arg, "once", "--write"],
             "timeoutSeconds": 180,
         },
     ]
@@ -256,7 +272,7 @@ def _write_run(runtime_dir: Path, payload: Dict[str, Any]) -> None:
 def _summary_zh(steps: List[Dict[str, Any]], failed: List[Dict[str, Any]]) -> str:
     if failed:
         return f"Agent 调度完成 {len(steps) - len(failed)}/{len(steps)} 步；失败步骤会保留为可重试。"
-    return f"Agent 已自动完成 {len(steps)} 个调度步骤，并刷新回测、回放、walk-forward、GA 和执行反馈证据。"
+    return f"Agent 已自动完成 {len(steps)} 个调度步骤，并刷新回测、回放、parity、执行反馈、Case Memory、walk-forward 和 GA 证据。"
 
 
 def _trim(text: str, limit: int = 900) -> str:

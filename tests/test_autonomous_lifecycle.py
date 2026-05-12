@@ -48,6 +48,34 @@ class AutonomousLifecycleTests(unittest.TestCase):
             route_strategies = {row["strategy"] for row in payload["routes"]}
             self.assertTrue(set(DEFAULT_STRATEGIES).issubset(route_strategies))
 
+    def test_parity_fail_blocks_rsi_long_from_shadow_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            runtime = Path(temp)
+            parity_dir = runtime / "parity"
+            parity_dir.mkdir(parents=True)
+            (parity_dir / "QuantGod_StrategyParityReport.json").write_text(
+                json.dumps(
+                    {
+                        "status": "PARITY_FAIL",
+                        "reasonZh": "Strategy JSON 与 MQL5 EA RSI 参数不一致。",
+                        "promotionGate": {"status": "BLOCKED", "promotionAllowed": False},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            payload = build_mt5_shadow_lane(runtime)
+
+            rsi_routes = [
+                row
+                for row in payload["routes"]
+                if row.get("strategy") == "RSI_Reversal" and row.get("direction") == "LONG"
+            ]
+            self.assertTrue(rsi_routes)
+            self.assertEqual(rsi_routes[0]["promotionStage"], "REJECTED")
+            self.assertTrue(payload["parityGate"]["parityFailBlocksShadow"])
+
     def test_polymarket_lane_is_never_real_money(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             runtime = Path(temp)
@@ -106,9 +134,11 @@ class AutonomousLifecycleTests(unittest.TestCase):
             self.assertEqual(payload["gaReview"]["historyProductionStatus"]["promotionGateStatus"], "PASS")
             self.assertEqual(payload["dailyTodo"]["historyProductionStatus"]["status"], "PASS")
             self.assertEqual(payload["dailyReview"]["historyProductionStatus"]["status"], "PASS")
+            self.assertIn("executionConsistencyReview", payload["dailyReview"])
             text = daily_autopilot_v2_to_chinese_text(payload)
             self.assertIn("GA 历史样本", text)
             self.assertIn("生产级 PASS", text)
+            self.assertIn("执行一致性复盘", text)
             self.assertTrue(payload["nextPhaseTodos"]["completedByAgent"])
             self.assertEqual(payload["nextPhaseTodos"]["strategyJsonTodo"]["status"], "COMPLETED_BY_AGENT")
             self.assertEqual(payload["nextPhaseTodos"]["gaEvolutionTodo"]["status"], "COMPLETED_BY_AGENT")

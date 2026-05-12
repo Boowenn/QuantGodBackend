@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from .io_utils import candidate_mt5_files_dirs, load_json, utc_now_iso, write_json
-from .schema import AGENT_VERSION, FOCUS_SYMBOL, SAFETY_BOUNDARY, parity_path
+from .schema import (
+    AGENT_VERSION,
+    FOCUS_SYMBOL,
+    SAFETY_BOUNDARY,
+    parity_ledger_path,
+    parity_path,
+    parity_public_path,
+)
 
 try:
     from tools.strategy_json.schema import base_strategy_seed
@@ -76,6 +84,7 @@ def build_parity_report(runtime_dir: Path, write: bool = True) -> Dict[str, Any]
     }
     if write:
         write_json(parity_path(runtime_dir), report)
+        _write_public_parity_outputs(runtime_dir, report)
     return report
 
 
@@ -534,6 +543,9 @@ def _deep_gate_matrix(vector: Dict[str, Any], replay: Dict[str, Any], diagnostic
         "schema": "quantgod.strategy_deep_parity_matrix.v1",
         "status": "FAIL" if hard_mismatches else "PASS",
         "strategyJson": {
+            "strategyId": vector.get("strategyId"),
+            "seedId": vector.get("seedId"),
+            "symbol": vector.get("symbol") or FOCUS_SYMBOL,
             "strategyFamily": vector.get("strategyFamily"),
             "direction": vector.get("direction"),
             "entryMode": vector.get("entryMode"),
@@ -607,6 +619,118 @@ def _deep_gate_matrix(vector: Dict[str, Any], replay: Dict[str, Any], diagnostic
         if not hard_mismatches
         else "三方关键门禁存在硬差异，禁止晋级。",
     }
+
+
+PARITY_LEDGER_FIELDS = [
+    "createdAt",
+    "symbol",
+    "strategyId",
+    "timeframe",
+    "barTime",
+    "rsiValue",
+    "rsiCrossback",
+    "sessionAllowed",
+    "spreadAllowed",
+    "newsRisk",
+    "runtimeFresh",
+    "fastlaneState",
+    "entryAllowed",
+    "entryMode",
+    "exitMode",
+    "lotSuggestion",
+    "parityStatus",
+    "promotionGateStatus",
+    "hardMismatchCount",
+    "hardMismatches",
+    "missingOptionalFields",
+    "reasonZh",
+]
+
+
+def _write_public_parity_outputs(runtime_dir: Path, report: Dict[str, Any]) -> None:
+    write_json(parity_public_path(runtime_dir), report)
+    row = _parity_ledger_row(report)
+    path = parity_ledger_path(runtime_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists() and path.stat().st_size > 0
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=PARITY_LEDGER_FIELDS)
+        if not exists:
+            writer.writeheader()
+        writer.writerow({key: row.get(key, "") for key in PARITY_LEDGER_FIELDS})
+
+
+def _parity_ledger_row(report: Dict[str, Any]) -> Dict[str, Any]:
+    deep = report.get("deepParity") if isinstance(report.get("deepParity"), dict) else {}
+    strategy = deep.get("strategyJson") if isinstance(deep.get("strategyJson"), dict) else {}
+    replay = deep.get("pythonReplay") if isinstance(deep.get("pythonReplay"), dict) else {}
+    replay_sample = replay.get("currentSample") if isinstance(replay.get("currentSample"), dict) else {}
+    ea = deep.get("mql5Ea") if isinstance(deep.get("mql5Ea"), dict) else {}
+    ea_route = ea.get("route") if isinstance(ea.get("route"), dict) else {}
+    ea_guards = ea.get("guards") if isinstance(ea.get("guards"), dict) else {}
+    ea_rsi = ea.get("rsi") if isinstance(ea.get("rsi"), dict) else {}
+    gate = report.get("promotionGate") if isinstance(report.get("promotionGate"), dict) else {}
+    sync = report.get("evidenceSync") if isinstance(report.get("evidenceSync"), dict) else {}
+    dimensions = report.get("parityDimensions") if isinstance(report.get("parityDimensions"), dict) else {}
+    dim_strategy = dimensions.get("strategyJson") if isinstance(dimensions.get("strategyJson"), dict) else {}
+    hard_mismatches = deep.get("hardMismatches") if isinstance(deep.get("hardMismatches"), list) else []
+    missing_optional = deep.get("missingOptionalFields") if isinstance(deep.get("missingOptionalFields"), list) else []
+    entry_allowed = _first_present(
+        replay_sample.get("allowed"),
+        ea_rsi.get("signalReady") if ea_guards.get("sessionOpen") and ea_guards.get("spreadAllowed") else None,
+    )
+    rsi_crossback = _first_present(
+        ea_rsi.get("buyReversal"),
+        ea_rsi.get("crossback"),
+        "rsi.crossback" in " ".join(str(item).lower() for item in strategy.get("entryGateExpectations", {})),
+    )
+    news_risk = "HARD" if ea_guards.get("newsBlocked") is True else ("OK" if ea_guards.get("newsBlocked") is False else "")
+    return {
+        "createdAt": report.get("createdAt") or utc_now_iso(),
+        "symbol": report.get("symbol") or strategy.get("symbol") or FOCUS_SYMBOL,
+        "strategyId": strategy.get("strategyId") or sync.get("strategyId") or "",
+        "timeframe": _first_present(ea_route.get("timeframe"), (strategy.get("rsi") or {}).get("timeframe")),
+        "barTime": _first_present(ea_route.get("lastSignalTime"), ea_route.get("lastEvalTime"), dim_strategy.get("lastSignalTime")),
+        "rsiValue": _first_present(ea_rsi.get("rsiClosed1"), ea_rsi.get("value"), ea_rsi.get("currentValue")),
+        "rsiCrossback": rsi_crossback,
+        "sessionAllowed": ea_guards.get("sessionOpen"),
+        "spreadAllowed": ea_guards.get("spreadAllowed"),
+        "newsRisk": news_risk,
+        "runtimeFresh": not bool(ea_guards.get("startupGuardActive")) if "startupGuardActive" in ea_guards else "",
+        "fastlaneState": _first_present(ea_route.get("lastStatus"), ea.get("state")),
+        "entryAllowed": entry_allowed,
+        "entryMode": strategy.get("entryMode") or "",
+        "exitMode": _exit_mode(strategy.get("exit") if isinstance(strategy.get("exit"), dict) else {}),
+        "lotSuggestion": (strategy.get("risk") or {}).get("opportunityLotMultiplier") if isinstance(strategy.get("risk"), dict) else "",
+        "parityStatus": report.get("status") or deep.get("status") or "",
+        "promotionGateStatus": gate.get("status") or "",
+        "hardMismatchCount": len(hard_mismatches),
+        "hardMismatches": ";".join(str(item) for item in hard_mismatches),
+        "missingOptionalFields": ";".join(str(item) for item in missing_optional),
+        "reasonZh": report.get("reasonZh") or deep.get("reasonZh") or "",
+    }
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value not in {None, ""}:
+            return value
+    return ""
+
+
+def _exit_mode(exit_cfg: Dict[str, Any]) -> str:
+    if not exit_cfg:
+        return ""
+    labels = []
+    if exit_cfg.get("trailStartR") is not None:
+        labels.append("TRAILING_STOP")
+    if exit_cfg.get("mfeGivebackPct") is not None:
+        labels.append("MFE_GIVEBACK")
+    if exit_cfg.get("timeStopBars"):
+        labels.append("TIME_STOP")
+    if exit_cfg.get("breakevenDelayR") is not None:
+        labels.append("BREAKEVEN")
+    return "+".join(labels) or "CUSTOM_EXIT"
 
 
 def _check_backtest_engine(engine: Any) -> Dict[str, Any]:
@@ -696,6 +820,9 @@ def _parity_dimensions(backtest: Dict[str, Any], live_loop: Dict[str, Any], diag
     top_policy = live_loop.get("topLiveEligiblePolicy") or live_loop.get("topPolicy") or {}
     return {
         "strategyJson": {
+            "strategyId": vector.get("strategyId"),
+            "seedId": vector.get("seedId"),
+            "symbol": vector.get("symbol") or FOCUS_SYMBOL,
             "strategyFamily": vector.get("strategyFamily"),
             "direction": vector.get("direction"),
             "entryMode": vector.get("entryMode"),

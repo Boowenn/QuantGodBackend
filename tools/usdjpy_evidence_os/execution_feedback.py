@@ -19,6 +19,8 @@ from .schema import (
     SAFETY_BOUNDARY,
     execution_feedback_ledger_path,
     execution_feedback_path,
+    execution_feedback_public_ledger_path,
+    execution_feedback_public_path,
 )
 
 AUDITED_FEEDBACK_SOURCES = {
@@ -79,8 +81,18 @@ def build_execution_feedback(runtime_dir: Path, write: bool = True) -> Dict[str,
     if write:
         if normalized:
             append_jsonl_unique(execution_feedback_ledger_path(runtime_dir), normalized, "feedbackId")
+            append_jsonl_unique(execution_feedback_public_ledger_path(runtime_dir), normalized, "feedbackId")
+        else:
+            _touch_jsonl(execution_feedback_ledger_path(runtime_dir))
+            _touch_jsonl(execution_feedback_public_ledger_path(runtime_dir))
         write_json(execution_feedback_path(runtime_dir), report)
+        write_json(execution_feedback_public_path(runtime_dir), report)
     return report
+
+
+def _touch_jsonl(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch(exist_ok=True)
 
 
 def _collect_rows(runtime_dir: Path) -> List[Tuple[Dict[str, Any], str]]:
@@ -194,7 +206,13 @@ def _metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         and not row.get("fillPrice")
     ]
     latency = [float(row["latencyMs"]) for row in rows if row.get("latencyMs")]
+    spreads = [abs(float(row["spreadAtEntry"])) for row in rows if row.get("spreadAtEntry")]
     profits = [float(row.get("profitR") or 0.0) for row in rows]
+    capture_values = [
+        max(-1.0, min(1.5, float(row.get("profitR") or 0.0) / float(row.get("mfeR") or 0.0)))
+        for row in rows
+        if float(row.get("mfeR") or 0.0) > 0.0
+    ]
     wins = [value for value in profits if value > 0]
     losses = [value for value in profits if value < 0]
     policy_mismatch = [
@@ -215,6 +233,11 @@ def _metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "maxAbsSlippagePips": round(max(slippage), 4) if slippage else 0.0,
         "avgLatencyMs": round(sum(latency) / len(latency), 2) if latency else 0.0,
         "maxLatencyMs": round(max(latency), 2) if latency else 0.0,
+        "avgSpreadAtEntry": round(sum(spreads) / len(spreads), 4) if spreads else 0.0,
+        "maxSpreadAtEntry": round(max(spreads), 4) if spreads else 0.0,
+        "spreadAnomalyCount": sum(1 for value in spreads if value > 2.0),
+        "avgProfitCaptureRatio": round(sum(capture_values) / len(capture_values), 4) if capture_values else 0.0,
+        "profitCaptureRatio": round(sum(capture_values) / len(capture_values), 4) if capture_values else 0.0,
         "netR": round(sum(profits), 4),
         "winRatePct": round(len(wins) / (len(wins) + len(losses)) * 100.0, 2) if wins or losses else 0.0,
         "policyMismatchCount": len(policy_mismatch),
@@ -243,6 +266,11 @@ def _quality_gates_from_metrics(metrics: Dict[str, Any], field_completeness: Dic
             "name": "latency",
             "status": "PASS" if float(metrics["avgLatencyMs"]) <= 1500.0 else "WARN",
             "reasonZh": "平均执行延迟可接受" if float(metrics["avgLatencyMs"]) <= 1500.0 else "平均执行延迟偏高，需要检查 VPS/终端/券商链路",
+        },
+        {
+            "name": "spread_at_entry",
+            "status": "PASS" if int(metrics.get("spreadAnomalyCount") or 0) == 0 else "WARN",
+            "reasonZh": "入场点差未发现异常" if int(metrics.get("spreadAnomalyCount") or 0) == 0 else "入场点差异常，需要限制触发窗口或等待流动性恢复",
         },
         {
             "name": "accepted_without_fill",

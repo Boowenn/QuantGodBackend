@@ -54,6 +54,7 @@ def daily_autopilot_v2_to_chinese_text(payload: Dict[str, Any]) -> str:
         history_production.get("reasonZh"),
         "等待 USDJPY SQLite 历史生产状态；未 PASS 时只允许 shadow/tester 观察。",
     )
+    consistency = payload.get("executionConsistencyReview") if isinstance(payload.get("executionConsistencyReview"), dict) else {}
 
     lines = [
         "【QuantGod 今日自动作战计划】",
@@ -96,6 +97,15 @@ def daily_autopilot_v2_to_chinese_text(payload: Dict[str, Any]) -> str:
         f"错失机会：{_fmt(review_metrics.get('missedOpportunity'), '0')}；早出场改善：{_fmt(review_metrics.get('earlyExit'), '0')}",
         f"MT5 模拟：晋级/强化 {promoted}，暂停 {evening_paused}，淘汰 {rejected}",
         f"新闻风险复盘：{news_mode} / {news_risk}；普通新闻不硬阻断，高冲击新闻硬阻断。",
+        "",
+        "执行一致性复盘：",
+        f"- Strategy JSON 与 EA 一致性：{_fmt(consistency.get('parityStatus'), 'MISSING')}；晋级门：{_fmt(consistency.get('parityGateStatus'), 'MISSING')}",
+        (
+            f"- 实盘执行质量：平均滑点 {_fmt(consistency.get('avgSlippagePips'), '0')} pips；"
+            f"平均延迟 {_fmt(consistency.get('avgLatencyMs'), '0')}ms；"
+            f"拒单 {_fmt(consistency.get('rejectCount'), '0')} 次"
+        ),
+        f"- Agent 结论：{_fmt(consistency.get('agentConclusionZh'), '继续收集 parity 和执行反馈。')}",
         "",
         "GA 全过程：",
         f"- 当前代数：第 {_fmt(ga_review.get('currentGeneration'), '0')} 代；最佳分数：{_fmt(ga_review.get('bestFitness'), '0')}",

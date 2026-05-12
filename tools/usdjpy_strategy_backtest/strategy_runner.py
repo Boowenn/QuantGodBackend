@@ -613,6 +613,9 @@ def _parity_vector(strategy: Dict[str, Any], bars: List[Bar], signals: List[Dict
     indicators = strategy.get("indicators") if isinstance(strategy.get("indicators"), dict) else {}
     return {
         "schema": "quantgod.strategy_parity_vector.v1",
+        "strategyId": strategy.get("strategyId"),
+        "seedId": strategy.get("seedId"),
+        "symbol": strategy.get("symbol"),
         "strategyFamily": strategy.get("strategyFamily"),
         "direction": strategy.get("direction"),
         "entryMode": entry_cfg.get("mode"),

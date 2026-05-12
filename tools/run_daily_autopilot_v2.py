@@ -59,6 +59,7 @@ def review_text(payload: Dict[str, object]) -> str:
     mt5 = payload.get("mt5ShadowLane") if isinstance(payload.get("mt5ShadowLane"), dict) else {}
     poly = payload.get("polymarketShadowLane") if isinstance(payload.get("polymarketShadowLane"), dict) else {}
     history = payload.get("historyProductionStatus") if isinstance(payload.get("historyProductionStatus"), dict) else {}
+    consistency = payload.get("executionConsistencyReview") if isinstance(payload.get("executionConsistencyReview"), dict) else {}
     lines = [
         "【QuantGod Agent 每日复盘】",
         "",
@@ -68,6 +69,11 @@ def review_text(payload: Dict[str, object]) -> str:
         f"错失机会：{metrics.get('missedOpportunity', 0)}｜早出场改善：{metrics.get('earlyExit', 0)}",
         f"MT5 模拟路线：{(mt5.get('summary') or {}).get('routeCount', 0)}｜Polymarket：{poly.get('stageZh') or poly.get('stage', '模拟观察')}",
         f"GA 历史样本：{history.get('statusZh', '等待生产状态')}｜{history.get('reasonZh', '未 PASS 时只允许 shadow/tester 观察')}",
+        "",
+        "【QuantGod 执行一致性复盘】",
+        f"Strategy JSON 与 EA 一致性：{consistency.get('parityStatus', 'MISSING')}｜晋级门：{consistency.get('parityGateStatus', 'MISSING')}",
+        f"实盘执行质量：滑点 {consistency.get('avgSlippagePips', 0)} pips｜延迟 {consistency.get('avgLatencyMs', 0)}ms｜拒单 {consistency.get('rejectCount', 0)}",
+        f"Agent 结论：{consistency.get('agentConclusionZh', '继续收集 parity 和执行反馈。')}",
         "",
         "复盘已由 Agent 自动完成；不等待人工确认，不修改 live preset，不连接 Polymarket 钱包。",
     ]

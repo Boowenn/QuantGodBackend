@@ -166,12 +166,14 @@ class USDJPYEvidenceOSTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-                report = build_execution_feedback(runtime_dir, write=False)
+                report = build_execution_feedback(runtime_dir, write=True)
                 self.assertEqual(report["sampleCount"], 2)
                 self.assertEqual(report["fieldCompleteness"]["status"], "PASS")
                 self.assertEqual(report["fieldCompleteness"]["auditedRows"], 2)
                 self.assertEqual(report["metrics"]["fillCount"], 2)
                 self.assertEqual(report["recentFeedback"][0]["intentId"], "pilot-live-001")
+                self.assertTrue((runtime_dir / "execution" / "QuantGod_LiveExecutionFeedback.jsonl").exists())
+                self.assertTrue((runtime_dir / "execution" / "QuantGod_LiveExecutionQualityReport.json").exists())
         finally:
             if old_mt5_files_dir is None:
                 os.environ.pop("QG_MT5_FILES_DIR", None)
@@ -266,6 +268,8 @@ class USDJPYEvidenceOSTests(unittest.TestCase):
                 self.assertEqual(parity["rsiDiagnosticsSource"]["type"], "standalone_file")
                 self.assertIn(str(mt5_files), parity["rsiDiagnosticsSource"]["path"])
                 self.assertTrue((runtime_dir / "QuantGod_USDJPYRsiEntryDiagnostics.json").exists())
+                self.assertTrue((runtime_dir / "parity" / "QuantGod_StrategyParityReport.json").exists())
+                self.assertTrue((runtime_dir / "parity" / "QuantGod_StrategyParityLedger.csv").exists())
                 self.assertEqual(parity["deepParity"]["strategyJson"]["rsi"]["period"], 2.0)
         finally:
             if old_mt5_files_dir is None:

@@ -28,12 +28,36 @@ def parity_path(runtime_dir: Path) -> Path:
     return evidence_dir(runtime_dir) / "QuantGod_StrategyParityReport.json"
 
 
+def parity_public_dir(runtime_dir: Path) -> Path:
+    return runtime_dir / "parity"
+
+
+def parity_public_path(runtime_dir: Path) -> Path:
+    return parity_public_dir(runtime_dir) / "QuantGod_StrategyParityReport.json"
+
+
+def parity_ledger_path(runtime_dir: Path) -> Path:
+    return parity_public_dir(runtime_dir) / "QuantGod_StrategyParityLedger.csv"
+
+
 def execution_feedback_path(runtime_dir: Path) -> Path:
     return evidence_dir(runtime_dir) / "QuantGod_LiveExecutionQualityReport.json"
 
 
 def execution_feedback_ledger_path(runtime_dir: Path) -> Path:
     return evidence_dir(runtime_dir) / "QuantGod_LiveExecutionFeedback.jsonl"
+
+
+def execution_public_dir(runtime_dir: Path) -> Path:
+    return runtime_dir / "execution"
+
+
+def execution_feedback_public_path(runtime_dir: Path) -> Path:
+    return execution_public_dir(runtime_dir) / "QuantGod_LiveExecutionQualityReport.json"
+
+
+def execution_feedback_public_ledger_path(runtime_dir: Path) -> Path:
+    return execution_public_dir(runtime_dir) / "QuantGod_LiveExecutionFeedback.jsonl"
 
 
 def case_memory_path(runtime_dir: Path) -> Path:

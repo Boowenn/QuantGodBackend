@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -35,6 +36,34 @@ def _recent_losses(runtime_dir: Path) -> Dict[str, Any]:
     return {"consecutiveLosses": losses, "dailyLossR": round(daily_loss_r, 4), "closeRows": len(usdjpy)}
 
 
+def _load_json(path: Path) -> Dict[str, Any]:
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+    return {}
+
+
+def _parity_execution_blockers(runtime_dir: Path) -> List[str]:
+    evidence = _load_json(runtime_dir / "evidence_os" / "QuantGod_USDJPYEvidenceOSStatus.json")
+    parity = evidence.get("parity") if isinstance(evidence.get("parity"), dict) else {}
+    execution = evidence.get("executionFeedback") if isinstance(evidence.get("executionFeedback"), dict) else {}
+    if not parity:
+        parity = _load_json(runtime_dir / "parity" / "QuantGod_StrategyParityReport.json")
+    if not execution:
+        execution = _load_json(runtime_dir / "execution" / "QuantGod_LiveExecutionQualityReport.json")
+    parity_gate = parity.get("promotionGate") if isinstance(parity.get("promotionGate"), dict) else {}
+    execution_gate = execution.get("promotionGate") if isinstance(execution.get("promotionGate"), dict) else {}
+    reasons: List[str] = []
+    if str(parity.get("status") or "").upper() == "PARITY_FAIL" or parity_gate.get("status") == "BLOCKED":
+        reasons.append("Strategy / Replay / EA parity 失败，禁止进入 SHADOW、GA elite 或 MICRO_LIVE")
+    if execution_gate.get("status") == "BLOCKED":
+        reasons.append("执行反馈质量阻断，禁止扩大 MICRO_LIVE")
+    return reasons
+
+
 def evaluate_hard_rollback(runtime_dir: Path) -> Dict[str, Any]:
     runtime_dir = Path(runtime_dir)
     reasons: List[str] = []
@@ -64,6 +93,7 @@ def evaluate_hard_rollback(runtime_dir: Path) -> Dict[str, Any]:
         reasons.append(f"连续亏损 {loss['consecutiveLosses']} 笔")
     if loss["dailyLossR"] <= -1.0:
         reasons.append(f"当日亏损达到 {loss['dailyLossR']}R")
+    reasons.extend(_parity_execution_blockers(runtime_dir))
     return {
         "ok": not reasons,
         "generatedAtIso": utc_now_iso(),
@@ -90,4 +120,3 @@ def append_rollback(runtime_dir: Path, payload: Dict[str, Any]) -> None:
         if is_new:
             writer.writeheader()
         writer.writerow(row)
-

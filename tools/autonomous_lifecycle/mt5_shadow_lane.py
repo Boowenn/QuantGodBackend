@@ -57,14 +57,50 @@ def _row_reason(row: Dict[str, Any], stage: str) -> str:
     return "继续模拟观察，不进入实盘。"
 
 
+def _load_json(path: Path) -> Dict[str, Any]:
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+    return {}
+
+
+def _parity_gate(runtime_dir: Path) -> Dict[str, Any]:
+    evidence = _load_json(runtime_dir / "evidence_os" / "QuantGod_USDJPYEvidenceOSStatus.json")
+    parity = evidence.get("parity") if isinstance(evidence.get("parity"), dict) else {}
+    if not parity:
+        parity = _load_json(runtime_dir / "parity" / "QuantGod_StrategyParityReport.json")
+    gate = parity.get("promotionGate") if isinstance(parity.get("promotionGate"), dict) else {}
+    failed = str(parity.get("status") or "").upper() == "PARITY_FAIL" or gate.get("status") == "BLOCKED"
+    return {
+        "status": parity.get("status") or "MISSING",
+        "promotionGateStatus": gate.get("status") or "MISSING",
+        "parityFailBlocksShadow": failed,
+        "reasonZh": parity.get("reasonZh") or gate.get("reasonZh") or "等待 Strategy / Replay / EA parity。",
+    }
+
+
+def _is_parity_scoped_route(row: Dict[str, Any]) -> bool:
+    strategy = str(row.get("strategy") or "").upper()
+    direction = str(row.get("direction") or "LONG").upper()
+    return strategy == "RSI_REVERSAL" and direction == "LONG"
+
+
 def build_mt5_shadow_lane(runtime_dir: Path, *, write: bool = False) -> Dict[str, Any]:
     runtime_dir = Path(runtime_dir)
     scoreboard = build_strategy_scoreboard(runtime_dir, min_samples=5)
+    parity_gate = _parity_gate(runtime_dir)
     routes: List[Dict[str, Any]] = []
     for row in scoreboard.get("routes") or []:
         if not isinstance(row, dict):
             continue
         stage = _lane_stage(row)
+        reason = _row_reason(row, stage)
+        if parity_gate["parityFailBlocksShadow"] and _is_parity_scoped_route(row):
+            stage = STAGE_REJECTED
+            reason = "P4-2 parity 失败：该 RSI LONG 策略禁止进入 Shadow/GA elite/Micro-live。"
         routes.append({
             "symbol": FOCUS_SYMBOL,
             "strategy": row.get("strategy"),
@@ -81,10 +117,15 @@ def build_mt5_shadow_lane(runtime_dir: Path, *, write: bool = False) -> Dict[str
             "score": row.get("score", 0),
             "promotionStage": stage,
             "promotionStageZh": stage_label(stage),
-            "reasonZh": _row_reason(row, stage),
+            "reasonZh": reason,
         })
     for strategy in DEFAULT_STRATEGIES:
         if not any(route.get("strategy") == strategy for route in routes):
+            stage = STAGE_SHADOW
+            reason = "策略池保留，等待模拟样本。"
+            if parity_gate["parityFailBlocksShadow"] and str(strategy).upper() == "RSI_REVERSAL":
+                stage = STAGE_REJECTED
+                reason = "P4-2 parity 失败：该 RSI LONG 策略禁止进入 Shadow/GA elite/Micro-live。"
             routes.append({
                 "symbol": FOCUS_SYMBOL,
                 "strategy": strategy,
@@ -97,9 +138,9 @@ def build_mt5_shadow_lane(runtime_dir: Path, *, write: bool = False) -> Dict[str
                 "mfeCaptureRate": 0,
                 "lossStreak": 0,
                 "score": 0,
-                "promotionStage": STAGE_SHADOW,
-                "promotionStageZh": stage_label(STAGE_SHADOW),
-                "reasonZh": "策略池保留，等待模拟样本。",
+                "promotionStage": stage,
+                "promotionStageZh": stage_label(stage),
+                "reasonZh": reason,
             })
     routes.sort(key=lambda item: (
         {"TESTER_ONLY": 0, "FAST_SHADOW": 1, "SHADOW": 2, "PAUSED": 3, "REJECTED": 4}.get(str(item.get("promotionStage")), 9),
@@ -129,6 +170,7 @@ def build_mt5_shadow_lane(runtime_dir: Path, *, write: bool = False) -> Dict[str
             "topShadowStrategy": routes[0].get("strategy") if routes else "",
             "topShadowStage": routes[0].get("promotionStage") if routes else "",
         },
+        "parityGate": parity_gate,
         "safety": {
             "shadowOnly": True,
             "liveEligible": False,
@@ -152,4 +194,3 @@ def build_mt5_shadow_lane(runtime_dir: Path, *, write: bool = False) -> Dict[str
             for route in routes:
                 writer.writerow({key: route.get(key, "") for key in fieldnames} | {"generatedAtIso": payload["generatedAtIso"]})
     return payload
-

@@ -237,6 +237,47 @@ def _history_production_summary(runtime_dir: Path) -> Dict[str, Any]:
     }
 
 
+def _execution_consistency_review(runtime_dir: Path) -> Dict[str, Any]:
+    evidence = _load_json(runtime_dir / "evidence_os" / "QuantGod_USDJPYEvidenceOSStatus.json")
+    parity = _safe_dict(evidence.get("parity")) or _load_json(runtime_dir / "parity" / "QuantGod_StrategyParityReport.json")
+    execution = _safe_dict(evidence.get("executionFeedback")) or _load_json(runtime_dir / "execution" / "QuantGod_LiveExecutionQualityReport.json")
+    parity_gate = _safe_dict(parity.get("promotionGate"))
+    execution_gate = _safe_dict(execution.get("promotionGate"))
+    metrics = _safe_dict(execution.get("metrics"))
+    field_contract = _safe_dict(execution.get("fieldCompleteness"))
+    parity_status = str(parity.get("status") or "MISSING").upper()
+    execution_gate_status = str(execution_gate.get("status") or "WAITING_FEEDBACK").upper()
+    parity_failed = parity_status == "PARITY_FAIL" or parity_gate.get("status") == "BLOCKED"
+    execution_blocked = execution_gate_status == "BLOCKED"
+    if parity_failed:
+        conclusion = "Strategy JSON / Replay / EA 口径不一致，阻断 shadow、GA elite 和 micro-live 晋级。"
+    elif execution_blocked:
+        conclusion = "执行质量未通过，降级观察并生成 Case Memory。"
+    elif parity_status == "PARITY_PASS" and execution_gate_status == "PASS":
+        conclusion = "策略口径和执行质量都可作为后续晋级支持证据。"
+    else:
+        conclusion = "继续收集 parity 与执行反馈，暂不扩大 live 阶段。"
+    return {
+        "schema": "quantgod.execution_consistency_review.v1",
+        "parityStatus": parity_status,
+        "parityGateStatus": parity_gate.get("status") or "MISSING",
+        "executionGateStatus": execution_gate_status,
+        "fieldContractStatus": field_contract.get("status") or "WAITING_FEEDBACK",
+        "sampleCount": execution.get("sampleCount", 0),
+        "avgSlippagePips": metrics.get("avgAbsSlippagePips", 0),
+        "avgLatencyMs": metrics.get("avgLatencyMs", 0),
+        "spreadAnomalyCount": metrics.get("spreadAnomalyCount", 0),
+        "rejectCount": metrics.get("rejectCount", 0),
+        "profitCaptureRatio": metrics.get("profitCaptureRatio", metrics.get("avgProfitCaptureRatio", "—")),
+        "promotionBlocked": bool(parity_failed or execution_blocked),
+        "blocksShadow": parity_failed,
+        "blocksGaElite": parity_failed,
+        "blocksMicroLive": parity_failed or execution_blocked,
+        "agentConclusionZh": conclusion,
+        "reasonZh": parity.get("reasonZh") or execution_gate.get("reasonZh") or conclusion,
+    }
+
+
 def _orchestration_summary(runtime_dir: Path) -> Dict[str, Any]:
     latest = read_latest_run(runtime_dir)
     if latest:
@@ -499,6 +540,7 @@ def _build_daily_review(
     metrics: Dict[str, Any],
     ga: Dict[str, Any],
     orchestration: Dict[str, Any],
+    consistency: Dict[str, Any],
     generated_at: str,
 ) -> Dict[str, Any]:
     lanes = _safe_dict(lifecycle.get("lanes") or agent.get("lanes"))
@@ -551,10 +593,11 @@ def _build_daily_review(
             "nextAction": ga.get("nextAction"),
         },
         "historyProductionStatus": ga.get("historyProductionStatus"),
+        "executionConsistencyReview": consistency,
         "orchestrationRun": orchestration,
         "summaryZh": (
             "每日复盘已由 Agent 自动完成：收集三车道样本、计算指标、更新升降级/回滚状态，"
-            "并记录 GA 是否使用生产级历史样本。"
+            "并记录 GA 是否使用生产级历史样本、parity 是否阻断晋级以及真实执行质量。"
         ),
     }
 
@@ -573,8 +616,9 @@ def build_daily_autopilot_v2(
     news_gate = _news_gate_summary(runtime_dir)
     ga = _ga_summary(runtime_dir)
     orchestration = _orchestration_summary(runtime_dir)
+    consistency = _execution_consistency_review(runtime_dir)
     daily_todo = _build_daily_todo(agent, lifecycle, metrics, ga, orchestration, generated_at)
-    daily_review = _build_daily_review(agent, lifecycle, metrics, ga, orchestration, generated_at)
+    daily_review = _build_daily_review(agent, lifecycle, metrics, ga, orchestration, consistency, generated_at)
     payload: Dict[str, Any] = {
         "ok": True,
         "schema": "quantgod.daily_autopilot_v2.v1",
@@ -589,6 +633,7 @@ def build_daily_autopilot_v2(
         "newsGate": news_gate,
         "dailyTodo": daily_todo,
         "dailyReview": daily_review,
+        "executionConsistencyReview": consistency,
         "orchestrationRun": orchestration,
         "gaReview": ga,
         "historyProductionStatus": ga.get("historyProductionStatus"),
