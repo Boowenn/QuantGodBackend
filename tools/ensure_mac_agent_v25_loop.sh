@@ -83,7 +83,7 @@ screen_running() {
 
 matching_screen_sessions() {
   command -v screen >/dev/null 2>&1 || return 0
-  screen -ls 2>/dev/null | awk -v name="$SCREEN_NAME" '
+  { screen -ls 2>/dev/null || true; } | awk -v name="$SCREEN_NAME" '
     $1 ~ "^[0-9]+\\." name "$" { print $1 }
   '
 }
