@@ -117,6 +117,28 @@ test('CSV endpoint filters by symbol and limit', async () => {
   }
 });
 
+test('CSV endpoint uses partial tail read for large limited ledgers', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'qg-phase2-csv-tail-'));
+  try {
+    const rows = ['Timestamp,Symbol,Route,Note'];
+    for (let index = 0; index < 2200; index += 1) {
+      rows.push(`2026-05-01 00:${String(index % 60).padStart(2, '0')}:00,USDJPYc,RSI_Reversal,${'x'.repeat(700)}-${index}`);
+    }
+    await writeFile(path.join(dir, 'QuantGod_TradeJournal.csv'), `${rows.join('\n')}\n`, 'utf8');
+    const res = await invoke('/api/trades/journal?symbol=USDJPYc&limit=3', {
+      defaultRuntimeDir: dir,
+      repoRoot: dir,
+      rootDir: dir,
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.data.partialRead, true);
+    assert.equal(res.body.data.returnedRows, 3);
+    assert.match(res.body.data.rows[2].Note, /2199$/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('missing files produce safe 404 envelope', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'qg-phase2-missing-'));
   try {

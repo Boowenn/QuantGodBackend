@@ -12,6 +12,14 @@ Dashboard/vue-dist/
 Dashboard/quantgod_cloud_sync.json
 Dashboard/QuantGod_*.json
 Dashboard/QuantGod_*.csv
+Dashboard/QuantGod_*.txt
+Dashboard/adaptive/
+Dashboard/agent/
+Dashboard/automation/
+Dashboard/live/
+Dashboard/notifications/
+Dashboard/quality/
+Dashboard/replay/
 runtime/
 archive/backtests/runs/
 archive/backtests/latest/QuantGod_BacktestSummary.json

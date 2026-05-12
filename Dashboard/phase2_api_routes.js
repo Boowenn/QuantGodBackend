@@ -20,6 +20,9 @@ const JSON_HEADERS = {
   Pragma: 'no-cache',
   Expires: '0',
 };
+const CSV_FULL_READ_BYTES = 1024 * 1024;
+const CSV_TAIL_MIN_BYTES = 256 * 1024;
+const CSV_TAIL_BYTES_PER_ROW = 2048;
 
 const PHASE2_API_SAFETY = Object.freeze({
   mode: 'QUANTGOD_PHASE2_API_V1',
@@ -249,6 +252,59 @@ function parseCsv(text) {
   return { headers, rows };
 }
 
+function positiveLimit(searchParams) {
+  const value = Number.parseInt(searchParams.get('limit') || '', 10);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(value, 5000);
+}
+
+function readCsvHeader(filePath) {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(64 * 1024);
+    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    const head = buffer.toString('utf8', 0, bytesRead);
+    const newline = head.indexOf('\n');
+    return (newline >= 0 ? head.slice(0, newline) : head).replace(/\r$/, '');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function readCsvTextForRequest(filePath, stat, searchParams) {
+  const limit = positiveLimit(searchParams);
+  if (!limit || !stat || stat.size <= CSV_FULL_READ_BYTES) {
+    return { text: fs.readFileSync(filePath, 'utf8'), partial: false, bytesRead: stat?.size || 0 };
+  }
+
+  const bytesToRead = Math.min(
+    stat.size,
+    Math.max(CSV_TAIL_MIN_BYTES, limit * CSV_TAIL_BYTES_PER_ROW),
+  );
+  if (bytesToRead >= stat.size) {
+    return { text: fs.readFileSync(filePath, 'utf8'), partial: false, bytesRead: stat.size };
+  }
+
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const start = Math.max(0, stat.size - bytesToRead);
+    const buffer = Buffer.alloc(bytesToRead);
+    const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, start);
+    let tail = buffer.toString('utf8', 0, bytesRead);
+    const firstNewline = tail.indexOf('\n');
+    if (firstNewline >= 0) tail = tail.slice(firstNewline + 1);
+    const header = readCsvHeader(filePath);
+    return {
+      text: `${header}\n${tail}`,
+      partial: true,
+      bytesRead,
+      requestedLimit: limit,
+    };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function parseTimeMs(row) {
   const keys = [
     'timestamp', 'Timestamp', 'time', 'Time', 'timeIso', 'TimeIso', 'EventTimeIso', 'OpenTime', 'CloseTime',
@@ -334,13 +390,20 @@ function handleCsvEndpoint(req, res, ctx, endpoint, fileName) {
   }
   try {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
-    const parsed = parseCsv(fs.readFileSync(resolved.filePath, 'utf8'));
+    const csvRead = readCsvTextForRequest(resolved.filePath, resolved.stat, url.searchParams);
+    const parsed = parseCsv(csvRead.text);
     const rows = filterRows(parsed.rows, url.searchParams);
     sendJson(
       res,
       200,
       withEnvelope(
-        { headers: parsed.headers, rows, totalRows: parsed.rows.length, returnedRows: rows.length },
+        {
+          headers: parsed.headers,
+          rows,
+          totalRows: parsed.rows.length,
+          returnedRows: rows.length,
+          partialRead: csvRead.partial,
+        },
         endpoint,
         resolved.filePath,
         resolved.stat,

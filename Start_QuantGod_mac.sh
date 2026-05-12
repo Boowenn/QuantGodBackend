@@ -116,11 +116,30 @@ quit_screen() {
   screen -S "$name" -X quit >/dev/null 2>&1 || true
 }
 
+bootout_launch_agent() {
+  local label="$1"
+  local plist="$HOME/Library/LaunchAgents/${label}.plist"
+  command -v launchctl >/dev/null 2>&1 || return 0
+  [[ -f "$plist" ]] || return 0
+  launchctl bootout "gui/$(id -u)" "$plist" >/dev/null 2>&1 || true
+}
+
 load_env_file "$SCRIPT_DIR/.env.local"
 load_env_file "$SCRIPT_DIR/.env.usdjpy.local"
 load_env_file "$SCRIPT_DIR/.env.auto.local"
 load_env_file "$SCRIPT_DIR/.env.telegram.local"
 load_env_file "$SCRIPT_DIR/.env.deepseek.local"
+
+if [[ "${QG_STOP_LEGACY_LAUNCH_AGENTS:-1}" == "1" ]]; then
+  for label in \
+    com.quantgod.backend-api \
+    com.quantgod.frontend-dev \
+    com.quantgod.usdjpy-history-sync \
+    com.quantgod.daily-autopilot \
+    com.quantgod.ai-telegram-monitor; do
+    bootout_launch_agent "$label"
+  done
+fi
 
 RUNTIME_CONFIGURED=0
 if [[ -n "${QG_RUNTIME_DIR:-}" || -n "${QG_MT5_FILES_DIR:-}" ]]; then
@@ -132,6 +151,7 @@ export QG_DASHBOARD_PORT="${QG_DASHBOARD_PORT:-8080}"
 export QG_FRONTEND_HOST="${QG_FRONTEND_HOST:-127.0.0.1}"
 export QG_FRONTEND_PORT="${QG_FRONTEND_PORT:-5173}"
 export QG_PYTHON_BIN="${QG_PYTHON_BIN:-python3}"
+export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=768}"
 export QG_RUNTIME_DIR="${QG_RUNTIME_DIR:-./Dashboard}"
 export QG_MT5_FILES_DIR="${QG_MT5_FILES_DIR:-./Dashboard}"
 export QG_FOCUS_SYMBOL="${QG_FOCUS_SYMBOL:-USDJPYc}"
@@ -160,13 +180,13 @@ MT5_LIVE_CONFIG="$MT5_PREFIX/drive_c/qg/QuantGod_MT5_HFM_LivePilot_mac.ini"
 export QG_MT5_TERMINAL_PATH="${QG_MT5_TERMINAL_PATH:-$MT5_ROOT/terminal64.exe}"
 export QG_MT5_PYTHON_BIN="${QG_MT5_PYTHON_BIN:-$QG_PYTHON_BIN}"
 export QG_USDJPY_HISTORY_SYNC_ENABLED="${QG_USDJPY_HISTORY_SYNC_ENABLED:-1}"
-export QG_USDJPY_HISTORY_INTERVAL_SECONDS="${QG_USDJPY_HISTORY_INTERVAL_SECONDS:-3600}"
+export QG_USDJPY_HISTORY_INTERVAL_SECONDS="${QG_USDJPY_HISTORY_INTERVAL_SECONDS:-7200}"
 export QG_USDJPY_HISTORY_MONTHS="${QG_USDJPY_HISTORY_MONTHS:-12}"
 export QG_USDJPY_HISTORY_TIMEFRAMES="${QG_USDJPY_HISTORY_TIMEFRAMES:-M1,M5,M15,H1}"
-export QG_USDJPY_HISTORY_MAX_BARS="${QG_USDJPY_HISTORY_MAX_BARS:-700000}"
+export QG_USDJPY_HISTORY_MAX_BARS="${QG_USDJPY_HISTORY_MAX_BARS:-300000}"
 export QG_USDJPY_HISTORY_MAX_LAG_HOURS="${QG_USDJPY_HISTORY_MAX_LAG_HOURS:-96}"
 export QG_USDJPY_MT5_SYMBOL="${QG_USDJPY_MT5_SYMBOL:-USDJPYc}"
-export QG_MT5_MAX_BARS="${QG_MT5_MAX_BARS:-1000000}"
+export QG_MT5_MAX_BARS="${QG_MT5_MAX_BARS:-300000}"
 export QG_PARAMLAB_HFM_ROOT="${QG_PARAMLAB_HFM_ROOT:-$SCRIPT_DIR/runtime/ParamLab_Tester_Sandbox/live_hfm_placeholder}"
 export QG_PARAMLAB_TESTER_ROOT="${QG_PARAMLAB_TESTER_ROOT:-$SCRIPT_DIR/runtime/HFM_MT5_Tester_Isolated}"
 export QG_MT5_TESTER_ROOT="${QG_MT5_TESTER_ROOT:-$QG_PARAMLAB_TESTER_ROOT}"
@@ -211,6 +231,7 @@ echo "MT5 terminal path: $QG_MT5_TERMINAL_PATH"
 echo "MT5 Python bin: $QG_MT5_PYTHON_BIN"
 echo "MT5 chart max bars: $QG_MT5_MAX_BARS"
 echo "USDJPY history sync: $QG_USDJPY_HISTORY_SYNC_ENABLED every ${QG_USDJPY_HISTORY_INTERVAL_SECONDS}s for ${QG_USDJPY_HISTORY_MONTHS} months, maxLag=${QG_USDJPY_HISTORY_MAX_LAG_HOURS}h"
+echo "Node heap cap: $NODE_OPTIONS"
 echo "Frontend: http://$QG_FRONTEND_HOST:$QG_FRONTEND_PORT/vue/?workspace=mt5"
 echo "Backend API: http://$QG_DASHBOARD_HOST:$QG_DASHBOARD_PORT/vue/"
 
@@ -302,11 +323,12 @@ fi
 
 if [[ "$FRONTEND_ENABLED" == "1" && -d "$FRONTEND_DIR" ]]; then
   start_screen "$FRONTEND_SCREEN" "$SCRIPT_DIR/runtime/frontend_dev_screen.log" \
-    "cd '$FRONTEND_DIR' && exec npm run dev -- --host '$QG_FRONTEND_HOST' --port '$QG_FRONTEND_PORT'"
+    "cd '$FRONTEND_DIR' && exec node ./node_modules/vite/bin/vite.js --host '$QG_FRONTEND_HOST' --port '$QG_FRONTEND_PORT'"
 fi
 
 if [[ "$AGENT_V25_ENABLED" == "1" ]]; then
   quit_screen "$LEGACY_DAILY_AUTOPILOT_SCREEN"
+  # Agent supervisor keeps tools/run_mac_agent_v25_loop.sh --loop alive.
   start_screen "$AGENT_V25_SUPERVISOR_SCREEN" "$SCRIPT_DIR/runtime/agent_v25_supervisor_screen.log" \
     "cd '$SCRIPT_DIR' && exec bash tools/ensure_mac_agent_v25_loop.sh --loop"
 fi
