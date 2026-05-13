@@ -57,15 +57,21 @@ The launcher starts the current v2.5 stack:
 - Backend API at `http://127.0.0.1:8080`.
 - Frontend Vite workbench at `http://127.0.0.1:5173/vue/?workspace=mt5`.
 - Agent v2.5 loop for USDJPY live-loop, policy generation, EA dry-run, daily todo, daily review, and rollback evidence.
-- USDJPY history sync remains enabled, with lower default MT5 chart/history bar caps for 16 GB Macs.
+- USDJPY history sync remains enabled, and you can still privately lower MT5 bar caps on 16 GB Macs through `.env.local`.
 
-The launcher keeps the original full stack but applies local memory controls by default:
+The launcher keeps the original full stack and supports local memory controls when you need them:
 
 - Node heap cap: `NODE_OPTIONS=--max-old-space-size=768`.
-- MT5 chart max bars: `QG_MT5_MAX_BARS=300000`.
+- MT5 chart max bars: repo default `QG_MT5_MAX_BARS=1000000` so MT5 CopyRates can cover 6-12 months of M1 bars.
 - USDJPY history max bars: `QG_USDJPY_HISTORY_MAX_BARS=300000`.
 - USDJPY history sync interval: `QG_USDJPY_HISTORY_INTERVAL_SECONDS=7200`.
 - Old `com.quantgod.*` LaunchAgents are stopped before startup to avoid duplicate backend/frontend/history/Agent loops.
+
+For memory-constrained local machines, override privately in `.env.local`, for example:
+
+```bash
+export QG_MT5_MAX_BARS=300000
+```
 
 The legacy daily autopilot loop is disabled by default. To deliberately use it for historical debugging only:
 
