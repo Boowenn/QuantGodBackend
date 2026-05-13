@@ -42,8 +42,11 @@ def _next_actions(
         actions.append("补齐缺失 strategy family parity 覆盖")
     elif parity.get("shadowResearchOnlyCount"):
         actions.append("持续观察 shadow-only 策略族的 EA 影子评估证据")
-    if execution_feedback.get("sampleCount", 0) < 5:
-        actions.append("持续收集 live/shadow execution feedback")
+    thresholds = execution_feedback.get("thresholds") or {}
+    if execution_feedback.get("sampleCount", 0) < thresholds.get("minProductionSamples", 20):
+        actions.append("继续收集 live/shadow execution feedback，直到样本达到生产观察阈值")
+    if execution_feedback.get("fieldCoverage", 0) < thresholds.get("minFieldCoverage", 0.8):
+        actions.append("补齐 execution feedback 缺失字段，避免 Case Memory / GA fitness 误判")
     if ga.get("status") != "PASS":
         actions.append("连续观察 GA 多代 elite / graveyard / lineage 稳定性")
     if history.get("status") != "PASS":
@@ -63,8 +66,11 @@ def build_report(runtime_dir: Path) -> dict[str, Any]:
     blockers = []
     if parity.get("failCount"):
         blockers.append("存在 PARITY_FAIL，相关策略不得晋级")
-    if execution_feedback.get("sampleCount", 0) < 5:
+    thresholds = execution_feedback.get("thresholds") or {}
+    if execution_feedback.get("sampleCount", 0) < thresholds.get("minUsableSamples", 5):
         blockers.append("真实/影子执行反馈样本不足")
+    if execution_feedback.get("coreCoverage", 0) < thresholds.get("minCoreCoverage", 0.95):
+        blockers.append("执行反馈核心字段覆盖率不足")
     if history.get("status") != "PASS":
         blockers.append("USDJPY 历史数据深度或表覆盖不足")
     if ga.get("status") != "PASS":

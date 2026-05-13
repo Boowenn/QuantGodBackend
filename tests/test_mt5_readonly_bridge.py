@@ -392,10 +392,13 @@ class Mt5ReadOnlyBridgeTests(unittest.TestCase):
             self.write_dashboard_with_trade_state(runtime, time.time() - 600)
             os.environ["QG_RUNTIME_DIR"] = tmp_dir
             os.environ["QG_MT5_EA_SNAPSHOT_MAX_AGE_SECONDS"] = "60"
+            old_candidates = bridge.runtime_dir_candidates
+            bridge.runtime_dir_candidates = lambda: [runtime]
             try:
                 positions = bridge.build_ea_snapshot_fallback(self.fallback_args("positions"))
                 snapshot = bridge.build_ea_snapshot_fallback(self.fallback_args("snapshot"))
             finally:
+                bridge.runtime_dir_candidates = old_candidates
                 if old_runtime is None:
                     os.environ.pop("QG_RUNTIME_DIR", None)
                 else:

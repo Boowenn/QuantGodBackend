@@ -4,7 +4,11 @@ from typing import Any
 
 
 def _section_status(name: str, section: dict[str, Any]) -> str:
-    return f"- {name}：{section.get('status', 'UNKNOWN')}｜{section.get('recommendation', '')}"
+    recommendation = section.get("recommendation")
+    if not recommendation:
+        recommendations = section.get("recommendationsZh") or []
+        recommendation = recommendations[0] if recommendations else ""
+    return f"- {name}：{section.get('status', 'UNKNOWN')}｜{recommendation}"
 
 
 def build_telegram_text(report: dict[str, Any]) -> str:

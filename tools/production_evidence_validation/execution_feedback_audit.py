@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from pathlib import Path
+from statistics import mean, median
 from typing import Any
 
 from .io_utils import read_json, read_jsonl
@@ -18,31 +20,195 @@ REQUIRED_FIELDS = [
     "maeR",
 ]
 
+CORE_FIELDS = [
+    "strategyId",
+    "eventType",
+    "profitR",
+    "mfeR",
+    "maeR",
+]
+
+NUMERIC_FIELDS = [
+    "slippagePips",
+    "latencyMs",
+    "spreadAtEntry",
+    "profitR",
+    "mfeR",
+    "maeR",
+]
+
+MIN_USABLE_SAMPLES = 5
+MIN_PRODUCTION_SAMPLES = 20
+MIN_FIELD_COVERAGE = 0.80
+MIN_CORE_COVERAGE = 0.95
+
+
+def _is_missing(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _safe_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_mode(row: dict[str, Any]) -> str:
+    raw = row.get("lane") or row.get("executionMode") or row.get("mode") or row.get("source") or "UNKNOWN"
+    value = str(raw).upper()
+    if "LIVE" in value:
+        return "LIVE"
+    if "SHADOW" in value or "DRY" in value or "SIM" in value:
+        return "SHADOW"
+    return "UNKNOWN"
+
+
+def _strategy_id(row: dict[str, Any]) -> str:
+    return str(row.get("strategyId") or row.get("strategy") or "UNKNOWN")
+
+
+def _event_type(row: dict[str, Any]) -> str:
+    return str(row.get("eventType") or row.get("event") or row.get("type") or "UNKNOWN").upper()
+
+
+def _field_coverage(rows: list[dict[str, Any]], fields: list[str]) -> tuple[float, dict[str, int]]:
+    if not rows:
+        return 0.0, {field: 0 for field in fields}
+    present: dict[str, int] = {field: 0 for field in fields}
+    for row in rows:
+        for field in fields:
+            if not _is_missing(row.get(field)):
+                present[field] += 1
+    total_cells = len(rows) * len(fields)
+    present_cells = sum(present.values())
+    return round(present_cells / total_cells, 4), present
+
+
+def _numeric_summary(rows: list[dict[str, Any]]) -> dict[str, dict[str, float | int | None]]:
+    summary: dict[str, dict[str, float | int | None]] = {}
+    for field in NUMERIC_FIELDS:
+        values = [_safe_float(row.get(field)) for row in rows]
+        clean = [value for value in values if value is not None]
+        if not clean:
+            summary[field] = {"count": 0, "avg": None, "median": None, "min": None, "max": None}
+            continue
+        summary[field] = {
+            "count": len(clean),
+            "avg": round(mean(clean), 6),
+            "median": round(median(clean), 6),
+            "min": round(min(clean), 6),
+            "max": round(max(clean), 6),
+        }
+    return summary
+
+
+def _coverage_status(sample_count: int, field_coverage: float, core_coverage: float) -> tuple[str, str, str]:
+    if sample_count <= 0:
+        return "WARN", "NO_SAMPLES", "NOT_USABLE"
+    if core_coverage < MIN_CORE_COVERAGE:
+        return "WARN", "CORE_FIELD_GAPS", "SHADOW_ONLY"
+    if field_coverage < MIN_FIELD_COVERAGE:
+        return "WARN", "FIELD_GAPS", "SHADOW_ONLY"
+    if sample_count < MIN_USABLE_SAMPLES:
+        return "WARN", "LOW_SAMPLE_COUNT", "SHADOW_ONLY"
+    if sample_count < MIN_PRODUCTION_SAMPLES:
+        return "WARN", "USABLE_BUT_THIN", "PRODUCTION_WATCH"
+    return "PASS", "PRODUCTION_READY", "PRODUCTION_USABLE"
+
 
 def audit_execution_feedback(runtime_dir: Path) -> dict[str, Any]:
     report_path = runtime_dir / "execution" / "QuantGod_LiveExecutionQualityReport.json"
     ledger_path = runtime_dir / "execution" / "QuantGod_LiveExecutionFeedback.jsonl"
     report = read_json(report_path, {}) or {}
-    rows = read_jsonl(ledger_path, 1000)
-    total = len(rows)
-    complete = 0
-    missing_counter: dict[str, int] = {}
+    rows = read_jsonl(ledger_path, 5000)
+    sample_count = len(rows)
+
+    full_field_coverage, present_by_field = _field_coverage(rows, REQUIRED_FIELDS)
+    core_coverage, present_core = _field_coverage(rows, CORE_FIELDS)
+
+    missing_field_counts = {
+        field: max(sample_count - present_by_field.get(field, 0), 0) for field in REQUIRED_FIELDS
+    }
+    complete_samples = sum(1 for row in rows if all(not _is_missing(row.get(field)) for field in REQUIRED_FIELDS))
+    core_complete_samples = sum(1 for row in rows if all(not _is_missing(row.get(field)) for field in CORE_FIELDS))
+
+    modes = Counter(_row_mode(row) for row in rows)
+    events = Counter(_event_type(row) for row in rows)
+    strategies = Counter(_strategy_id(row) for row in rows)
+
+    by_strategy: dict[str, dict[str, Any]] = {}
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        missing = [field for field in REQUIRED_FIELDS if row.get(field) in (None, "")]
-        if not missing:
-            complete += 1
-        for field in missing:
-            missing_counter[field] = missing_counter.get(field, 0) + 1
-    coverage = (complete / total) if total else 0.0
-    status = "PASS" if total >= 5 and coverage >= 0.8 else ("WARN" if total else "WARN")
+        grouped[_strategy_id(row)].append(row)
+    for strategy, strategy_rows in sorted(grouped.items()):
+        strategy_field_coverage, _ = _field_coverage(strategy_rows, REQUIRED_FIELDS)
+        strategy_core_coverage, _ = _field_coverage(strategy_rows, CORE_FIELDS)
+        by_strategy[strategy] = {
+            "sampleCount": len(strategy_rows),
+            "fieldCoverage": strategy_field_coverage,
+            "coreCoverage": strategy_core_coverage,
+            "eventTypeCounts": dict(Counter(_event_type(row) for row in strategy_rows)),
+            "modeCounts": dict(Counter(_row_mode(row) for row in strategy_rows)),
+        }
+
+    status, coverage_grade, evidence_usability = _coverage_status(
+        sample_count,
+        full_field_coverage,
+        core_coverage,
+    )
+
+    blockers: list[str] = []
+    if sample_count <= 0:
+        blockers.append("没有 live/shadow execution feedback 样本")
+    if core_coverage < MIN_CORE_COVERAGE:
+        blockers.append("核心执行反馈字段覆盖率不足")
+    if full_field_coverage < MIN_FIELD_COVERAGE:
+        blockers.append("执行反馈字段覆盖率不足")
+    if sample_count and sample_count < MIN_USABLE_SAMPLES:
+        blockers.append("执行反馈样本过少，暂不能用于生产级裁决")
+    elif sample_count and sample_count < MIN_PRODUCTION_SAMPLES:
+        blockers.append("执行反馈样本仍偏薄，建议继续观察")
+
+    recommendations: list[str] = []
+    if sample_count < MIN_PRODUCTION_SAMPLES:
+        recommendations.append("继续收集 live/shadow execution feedback 样本")
+    top_missing = [field for field, count in missing_field_counts.items() if count > 0]
+    if top_missing:
+        recommendations.append("补齐缺失字段：" + ", ".join(top_missing[:5]))
+    if not recommendations:
+        recommendations.append("执行反馈覆盖率可用于生产观察")
+
     return {
         "status": status,
+        "coverageGrade": coverage_grade,
+        "evidenceUsability": evidence_usability,
         "reportPath": str(report_path) if report_path.exists() else "",
         "ledgerPath": str(ledger_path) if ledger_path.exists() else "",
-        "sampleCount": total,
-        "completeSamples": complete,
-        "fieldCoverage": round(coverage, 4),
-        "missingFieldCounts": missing_counter,
+        "sampleCount": sample_count,
+        "completeSamples": complete_samples,
+        "coreCompleteSamples": core_complete_samples,
+        "fieldCoverage": full_field_coverage,
+        "coreCoverage": core_coverage,
+        "requiredFields": REQUIRED_FIELDS,
+        "coreFields": CORE_FIELDS,
+        "presentFieldCounts": present_by_field,
+        "presentCoreFieldCounts": present_core,
+        "missingFieldCounts": missing_field_counts,
+        "modeCounts": dict(modes),
+        "eventTypeCounts": dict(events),
+        "strategyCounts": dict(strategies),
+        "strategyCoverage": by_strategy,
+        "numericSummary": _numeric_summary(rows),
         "qualityReportStatus": report.get("status") or report.get("summary", {}).get("status"),
-        "recommendation": "Collect more live/shadow execution feedback samples." if total < 5 else "Improve missing feedback fields." if coverage < 0.8 else "Execution feedback coverage is usable.",
+        "blockersZh": blockers,
+        "recommendationsZh": recommendations,
+        "thresholds": {
+            "minUsableSamples": MIN_USABLE_SAMPLES,
+            "minProductionSamples": MIN_PRODUCTION_SAMPLES,
+            "minFieldCoverage": MIN_FIELD_COVERAGE,
+            "minCoreCoverage": MIN_CORE_COVERAGE,
+        },
     }
