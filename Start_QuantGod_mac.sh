@@ -235,6 +235,10 @@ echo "Node heap cap: $NODE_OPTIONS"
 echo "Frontend: http://$QG_FRONTEND_HOST:$QG_FRONTEND_PORT/vue/?workspace=mt5"
 echo "Backend API: http://$QG_DASHBOARD_HOST:$QG_DASHBOARD_PORT/vue/"
 
+echo "Maintaining runtime logs..."
+"$QG_PYTHON_BIN" "$SCRIPT_DIR/tools/maintain_runtime_logs.py" \
+  --runtime-root "$SCRIPT_DIR/runtime" || echo "Runtime log maintenance failed"
+
 if [[ -d "$MT5_ROOT" ]]; then
   echo "Syncing QuantGod files into MT5..."
   mkdir -p "$MT5_FILES" "$MT5_EXPERTS" "$MT5_PRESETS" "$MT5_PREFIX/drive_c/qg"

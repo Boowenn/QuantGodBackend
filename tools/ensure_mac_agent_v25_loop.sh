@@ -75,6 +75,12 @@ export QG_MT5_FILES_DIR="${QG_MT5_FILES_DIR:-$RUNTIME_DIR}"
 STATUS_FILE="$RUNTIME_DIR/agent/QuantGod_AgentV25LoopStatus.json"
 SUPERVISOR_FILE="$RUNTIME_DIR/agent/QuantGod_AgentV25SupervisorStatus.json"
 LOG_FILE="$REPO_ROOT/runtime/agent_v25_screen.log"
+RUNTIME_LOG_ROOT="${QG_RUNTIME_LOG_ROOT:-$REPO_ROOT/runtime}"
+
+maintain_runtime_logs() {
+  "$PYTHON_BIN" "$REPO_ROOT/tools/maintain_runtime_logs.py" \
+    --runtime-root "$RUNTIME_LOG_ROOT" >/dev/null 2>&1 || true
+}
 
 screen_running() {
   command -v screen >/dev/null 2>&1 || return 1
@@ -177,6 +183,7 @@ restart_loop() {
 
 ensure_once() {
   local age reason session_count
+  maintain_runtime_logs
   age="$(status_age_seconds)"
   session_count="$(matching_screen_sessions | wc -l | tr -d ' ')"
   if [[ "$session_count" == "1" && "$age" -le "$STALE_SECONDS" ]]; then
