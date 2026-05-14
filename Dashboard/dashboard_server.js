@@ -13,6 +13,7 @@ const gaFactoryApiRoutes = require('./ga_factory_api_routes');
 const telegramGatewayOpsApiRoutes = require('./telegram_gateway_ops_api_routes');
 const productionEvidenceValidationApiRoutes = require('./production_evidence_validation_api_routes');
 const stateApiRoutes = require('./state_api_routes');
+const { readJsonFileCached, stringifyJson } = require('./api_perf_cache');
 const os = require('os');
 const { spawn } = require('child_process');
 
@@ -278,7 +279,7 @@ function sendJson(res, statusCode, payload, req) {
     'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
     Pragma: 'no-cache',
     Expires: '0',
-  }, cors), JSON.stringify(payload, null, 2));
+  }, cors), stringifyJson(payload));
 }
 
 function readRequestBody(req, maxBytes = 64 * 1024) {
@@ -510,8 +511,8 @@ function readQuantGodJsonFile(fileName) {
   let lastError = null;
   for (const item of existing) {
     try {
-      const text = fs.readFileSync(item.candidate, 'utf8').replace(/^\uFEFF/, '');
-      return { payload: JSON.parse(text), filePath: item.candidate };
+      const read = readJsonFileCached(item.candidate);
+      return { payload: read.payload, filePath: item.candidate };
     } catch (error) {
       lastError = error;
     }
@@ -3439,9 +3440,7 @@ const server = http.createServer((req, res) => {
     const latestDashboard = path.join(defaultRuntimeDir, 'QuantGod_Dashboard.json');
     if (fs.existsSync(latestDashboard)) {
       try {
-        const text = fs.readFileSync(latestDashboard, 'utf8').replace(/^\uFEFF/, '');
-        const stat = fs.statSync(latestDashboard);
-        const payload = JSON.parse(text);
+        const { payload, stat } = readJsonFileCached(latestDashboard);
         const terminal = readMt5TerminalStatus();
         sendJson(res, 200, withServiceMeta({
           ...payload,

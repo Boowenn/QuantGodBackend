@@ -1,6 +1,7 @@
 import gzip
 import importlib.util
 import os
+import time
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -61,6 +62,55 @@ class RuntimeLogMaintenanceTests(unittest.TestCase):
             self.assertTrue(any(item["action"] == "compressed_legacy_archive" for item in status["compressedLegacy"]))
             self.assertFalse(old_archive.exists())
             self.assertTrue(any(item["reason"] == "expired_archive" for item in status["deleted"]))
+
+    def test_prunes_log_archives_over_size_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_root = Path(tmp) / "runtime"
+            archive_dir = runtime_root / "log_archive"
+            archive_dir.mkdir(parents=True)
+            old_archive = archive_dir / "agent_v25_screen.20260510T1459JST.log.gz"
+            new_archive = archive_dir / "agent_v25_screen.20260511T1459JST.log.gz"
+            for archive in (old_archive, new_archive):
+                with gzip.open(archive, "wt", encoding="utf-8") as handle:
+                    handle.write("x" * 128)
+            now = time.time()
+            os.utime(old_archive, (now - 2, now - 2))
+            os.utime(new_archive, (now - 1, now - 1))
+
+            status = runtime_logs.maintain_logs(
+                runtime_root,
+                archive_dir=archive_dir,
+                max_active_bytes=1024 * 1024,
+                archive_max_bytes=1,
+                retention_days=30,
+                maintain_jsonl=False,
+            )
+
+            self.assertTrue(any(item["reason"] == "archive_size_cap" for item in status["deleted"]))
+            self.assertFalse(old_archive.exists())
+
+    def test_compacts_large_jsonl_and_archives_full_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_root = Path(tmp) / "runtime"
+            ledger = runtime_root / "execution" / "QuantGod_LiveExecutionFeedback.jsonl"
+            ledger.parent.mkdir(parents=True)
+            ledger.write_text("".join(f'{{"i":{i},"text":"{"x" * 20}"}}\n' for i in range(10)), encoding="utf-8")
+
+            status = runtime_logs.maintain_logs(
+                runtime_root,
+                max_active_bytes=1024 * 1024,
+                jsonl_max_active_bytes=90,
+                jsonl_keep_lines=3,
+                jsonl_min_age_seconds=0,
+                maintain_jsonl=True,
+            )
+
+            self.assertEqual(len(status["jsonl"]["compacted"]), 1)
+            self.assertLessEqual(len(ledger.read_text(encoding="utf-8").splitlines()), 3)
+            archive_path = Path(status["jsonl"]["compacted"][0]["archive"])
+            self.assertTrue(archive_path.exists())
+            with gzip.open(archive_path, "rt", encoding="utf-8") as handle:
+                self.assertIn('"i":0', handle.read())
 
 
 if __name__ == "__main__":
