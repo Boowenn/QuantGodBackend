@@ -109,12 +109,6 @@ def _cases_from_execution(runtime_dir: Path) -> List[Dict[str, Any]]:
         cases.append(_case("POLICY_MISMATCH", "EA 已接受指令但未看到成交回执偏多，需要核对历史同步和回执链路", metrics, "verify_execution_ack_fill_sync", priority="HIGH"))
     if int(metrics.get("policyMismatchCount") or 0) > 0:
         cases.append(_case("POLICY_MISMATCH", "发现 policy 阻断态仍有执行痕迹，需要检查 EA 同步", metrics, "verify_ea_policy_sync", priority="HIGH"))
-    for row in feedback.get("recentFeedback", []) if isinstance(feedback.get("recentFeedback"), list) else []:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("strategyId") or "RSI_Reversal") != "RSI_Reversal":
-            cases.append(_case("POLICY_MISMATCH", "执行反馈出现非 RSI_Reversal 策略，需要确认实盘路线仍被锁定", row, "verify_live_lane_strategy_lock", priority="HIGH"))
-            break
     return cases
 
 

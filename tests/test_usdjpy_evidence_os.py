@@ -449,6 +449,81 @@ class USDJPYEvidenceOSTests(unittest.TestCase):
             self.assertFalse(evidence["safety"]["orderSendAllowed"])
             self.assertTrue((runtime_dir / "evidence_os" / "QuantGod_StrategyParityReport.json").exists())
 
+    def test_execution_feedback_refresh_uses_public_ledger_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            execution_dir = runtime_dir / "execution"
+            execution_dir.mkdir(parents=True)
+            (execution_dir / "QuantGod_LiveExecutionFeedback.jsonl").write_text(
+                '{"schema":"quantgod.live_execution_feedback.v1","feedbackId":"USDJPY-FEEDBACK-00001",'
+                '"symbol":"USDJPYc","policyId":"USDJPY_LIVE_LOOP","strategyId":"RSI_Reversal",'
+                '"sourceKeys":["entryMode","runtimeReady","whyNoEntry"]}\n'
+                '{"schema":"quantgod.live_execution_feedback.v1","feedbackId":"public-fill","eventType":"ORDER_FILL",'
+                '"symbol":"USDJPYc","side":"BUY","policyId":"USDJPY_LIVE_LOOP","strategyId":"RSI_Reversal",'
+                '"intentId":"pilot-public","expectedPrice":155.20,"fillPrice":155.21,"slippagePips":0.1,'
+                '"spreadAtEntry":0.3,"latencyMs":110,"profitR":0,"mfeR":0,"maeR":0}\n',
+                encoding="utf-8",
+            )
+
+            report = build_execution_feedback(runtime_dir, write=True)
+            self.assertEqual(report["sampleCount"], 2)
+            self.assertNotEqual(report["fieldCompleteness"]["status"], "BLOCKED")
+            self.assertNotIn("eventType", report["fieldCompleteness"]["missingCounts"])
+            self.assertEqual(report["metrics"]["liveLaneCheckedRows"], 1)
+            self.assertEqual(report["metrics"]["liveLaneStrategyMismatchCount"], 0)
+            self.assertEqual(report["recentFeedback"][0]["feedbackId"], "public-fill")
+
+    def test_dry_run_non_rsi_does_not_trigger_live_lane_strategy_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            (runtime_dir / "QuantGod_LiveExecutionFeedback.jsonl").write_text(
+                "\n".join(
+                    [
+                        '{"schema":"quantgod.live_execution_feedback.v1","feedbackId":"fill-rsi","eventType":"ORDER_FILL","symbol":"USDJPYc","side":"BUY","policyId":"USDJPY_LIVE_LOOP","strategyId":"RSI_Reversal","intentId":"pilot-rsi","expectedPrice":155.20,"fillPrice":155.21,"slippagePips":0.1,"spreadAtEntry":0.3,"latencyMs":110,"profitR":0,"mfeR":0,"maeR":0}',
+                        '{"schema":"quantgod.live_execution_feedback.v1","feedbackId":"close-rsi","eventType":"ORDER_CLOSE","symbol":"USDJPYc","side":"SELL","policyId":"USDJPY_LIVE_LOOP","strategyId":"RSI_Reversal","intentId":"pilot-rsi","expectedPrice":155.21,"fillPrice":155.42,"slippagePips":0,"spreadAtEntry":0,"latencyMs":0,"profitR":0.45,"mfeR":0.7,"maeR":-0.2,"exitReason":"TP"}',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (runtime_dir / "QuantGod_USDJPYEADryRunDecisionLedger.csv").write_text(
+                "\n".join(
+                    [
+                        "generatedAt,symbol,strategy,direction,decision,entryMode,reason,recommendedLot",
+                        "2026-05-08T14:20:40Z,USDJPYc,BB_Triple,LONG,OBSERVE,DRY_RUN,shadow only,0.01",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            evidence = build_evidence_os(runtime_dir, write=True)
+            metrics = evidence["executionFeedback"]["metrics"]
+            self.assertEqual(metrics["liveLaneStrategyMismatchCount"], 0)
+            self.assertEqual(metrics["liveLaneDirectionMismatchCount"], 0)
+            self.assertEqual(metrics["liveLaneSymbolMismatchCount"], 0)
+            self.assertNotIn("verify_live_lane_strategy_lock", evidence["caseMemory"]["mutationHints"])
+            recent_strategies = {row["strategyId"] for row in evidence["executionFeedback"]["recentFeedback"]}
+            self.assertNotIn("BB_Triple", recent_strategies)
+
+    def test_live_non_rsi_entry_blocks_live_lane_strategy_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            (runtime_dir / "QuantGod_LiveExecutionFeedback.jsonl").write_text(
+                '{"schema":"quantgod.live_execution_feedback.v1","feedbackId":"send-bb","eventType":"ORDER_ACCEPTED",'
+                '"symbol":"USDJPYc","side":"BUY","policyId":"USDJPY_LIVE_LOOP","strategyId":"BB_Triple",'
+                '"intentId":"pilot-bb","expectedPrice":155.20,"fillPrice":155.20,"slippagePips":0,'
+                '"spreadAtEntry":0.3,"latencyMs":110,"retcode":10009,"profitR":0,"mfeR":0,"maeR":0}\n',
+                encoding="utf-8",
+            )
+
+            evidence = build_evidence_os(runtime_dir, write=True)
+            execution = evidence["executionFeedback"]
+            self.assertEqual(execution["metrics"]["liveLaneStrategyMismatchCount"], 1)
+            self.assertEqual(execution["promotionGate"]["status"], "BLOCKED")
+            blocker_codes = {row["code"] for row in execution["promotionGate"]["blockers"]}
+            self.assertIn("LIVE_LANE_STRATEGY_LOCK_MISMATCH", blocker_codes)
+            self.assertIn("POLICY_MISMATCH", evidence["caseMemory"]["caseTypeCounts"])
+            self.assertIn("verify_live_lane_strategy_lock", evidence["caseMemory"]["mutationHints"])
+
     def test_execution_quality_feeds_case_memory_and_ga_penalty(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime_dir = Path(tmp)

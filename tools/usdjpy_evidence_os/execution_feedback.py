@@ -28,6 +28,20 @@ AUDITED_FEEDBACK_SOURCES = {
     "QuantGod_LiveExecutionFeedbackHistory.jsonl",
 }
 
+ADVISORY_FEEDBACK_SOURCES = {
+    "QuantGod_USDJPYEADryRunDecisionLedger.csv",
+    "QuantGod_USDJPYLiveLoopLedger.csv",
+}
+ADVISORY_SOURCE_KEYS = {
+    "entryMode",
+    "presetReady",
+    "runtimeReady",
+    "stateZh",
+    "topDirection",
+    "topStrategy",
+    "whyNoEntry",
+}
+
 REQUIRED_LIVE_EXECUTION_FIELDS = {
     "core": ("policyId", "intentId", "eventType", "symbol", "strategyId"),
     "send": ("expectedPrice", "latencyMs"),
@@ -41,6 +55,7 @@ FILL_EVENT_TYPES = {"ORDER_FILL"}
 CLOSE_EVENT_TYPES = {"ORDER_CLOSE", "POSITION_CLOSE", "HISTORY_CLOSE"}
 REJECT_EVENT_TYPES = {"ORDER_REJECT", "ORDER_REJECTED"}
 OUTCOME_EVENT_TYPES = CLOSE_EVENT_TYPES | {"TRADE_OUTCOME", "HISTORY_OUTCOME"}
+LIVE_LANE_ENTRY_EVENT_TYPES = SEND_EVENT_TYPES | FILL_EVENT_TYPES | REJECT_EVENT_TYPES
 
 
 def build_execution_feedback(runtime_dir: Path, write: bool = True) -> Dict[str, Any]:
@@ -74,7 +89,7 @@ def build_execution_feedback(runtime_dir: Path, write: bool = True) -> Dict[str,
         "caseMemoryTriggers": case_memory_triggers,
         "agentAction": _agent_action(promotion_gate),
         "nextActionZh": _next_action_zh(promotion_gate),
-        "recentFeedback": normalized[-20:],
+        "recentFeedback": _recent_feedback(normalized),
         "reasonZh": "执行反馈统一审计 EA trade event、成交、拒单、滑点、延迟和 policy 偏离；不会下单。",
         "safety": dict(SAFETY_BOUNDARY),
     }
@@ -101,6 +116,10 @@ def _collect_rows(runtime_dir: Path) -> List[Tuple[Dict[str, Any], str]]:
         for name in ("QuantGod_LiveExecutionFeedback.jsonl", "QuantGod_LiveExecutionFeedbackHistory.jsonl"):
             path = directory / name
             rows.extend((row, path.name) for row in read_jsonl_tail(path, 1000))
+    for directory in (runtime_dir / "execution", runtime_dir / "evidence_os"):
+        for name in ("QuantGod_LiveExecutionFeedback.jsonl", "QuantGod_LiveExecutionFeedbackHistory.jsonl"):
+            path = directory / name
+            rows.extend((row, str(row.get("source") or path.name)) for row in read_jsonl_tail(path, 1000))
     trade_events = runtime_dir / "QuantGod_RuntimeTradeEvents.jsonl"
     rows.extend((row, trade_events.name) for row in read_jsonl_tail(trade_events, 500))
     live_loop_ledger = runtime_dir / "live" / "QuantGod_USDJPYLiveLoopLedger.csv"
@@ -221,6 +240,16 @@ def _metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         if str(row.get("policyId") or "").upper() in {"EVIDENCE_MISSING", "BLOCKED"}
         and (row.get("fillPrice") or row.get("retcode"))
     ]
+    live_lane_rows = [row for row in rows if _is_live_lane_entry_row(row)]
+    live_lane_strategy_mismatch = [
+        row for row in live_lane_rows if not _is_allowed_live_lane_strategy(row.get("strategyId"))
+    ]
+    live_lane_direction_mismatch = [
+        row for row in live_lane_rows if not _is_allowed_live_lane_side(row.get("side"))
+    ]
+    live_lane_symbol_mismatch = [
+        row for row in live_lane_rows if not _is_allowed_live_lane_symbol(row.get("symbol"))
+    ]
     return {
         "feedbackRows": len(rows),
         "acceptedCount": len(accepted),
@@ -241,6 +270,10 @@ def _metrics(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "netR": round(sum(profits), 4),
         "winRatePct": round(len(wins) / (len(wins) + len(losses)) * 100.0, 2) if wins or losses else 0.0,
         "policyMismatchCount": len(policy_mismatch),
+        "liveLaneCheckedRows": len(live_lane_rows),
+        "liveLaneStrategyMismatchCount": len(live_lane_strategy_mismatch),
+        "liveLaneDirectionMismatchCount": len(live_lane_direction_mismatch),
+        "liveLaneSymbolMismatchCount": len(live_lane_symbol_mismatch),
         "feedbackQuality": _feedback_quality(len(rows), len(fills), len(rejects)),
     }
 
@@ -281,6 +314,15 @@ def _quality_gates_from_metrics(metrics: Dict[str, Any], field_completeness: Dic
             "name": "policy_mismatch",
             "status": "PASS" if int(metrics["policyMismatchCount"]) == 0 else "WARN",
             "reasonZh": "未发现 policy 与执行明显偏离" if int(metrics["policyMismatchCount"]) == 0 else "发现 policy 阻断态仍有执行痕迹，需要复盘",
+        },
+        {
+            "name": "live_lane_strategy_lock",
+            "status": "PASS" if _live_lane_mismatch_count(metrics) == 0 else "WARN",
+            "reasonZh": (
+                "真实执行反馈仍锁定 USDJPY / RSI_Reversal / LONG"
+                if _live_lane_mismatch_count(metrics) == 0
+                else "真实执行反馈出现非 USDJPY / RSI_Reversal / LONG 入场痕迹，需要核对 EA 实盘策略锁"
+            ),
         },
         {
             "name": "field_contract",
@@ -331,6 +373,20 @@ def _promotion_gate(
             0,
             "POLICY_MISMATCH",
             "verify_ea_policy_sync",
+        )
+    live_lane_mismatch_count = _live_lane_mismatch_count(metrics)
+    if live_lane_mismatch_count > 0:
+        add_blocker(
+            "LIVE_LANE_STRATEGY_LOCK_MISMATCH",
+            "真实执行反馈出现非 USDJPY / RSI_Reversal / LONG 入场痕迹，必须先核对 EA 实盘策略锁。",
+            {
+                "strategyMismatchCount": metrics.get("liveLaneStrategyMismatchCount"),
+                "directionMismatchCount": metrics.get("liveLaneDirectionMismatchCount"),
+                "symbolMismatchCount": metrics.get("liveLaneSymbolMismatchCount"),
+            },
+            0,
+            "POLICY_MISMATCH",
+            "verify_live_lane_strategy_lock",
         )
     if int(metrics.get("acceptedWithoutFillCount") or 0) > 5:
         add_blocker(
@@ -436,6 +492,9 @@ def _case_memory_triggers(metrics: Dict[str, Any], promotion_gate: Dict[str, Any
                     "avgLatencyMs": metrics.get("avgLatencyMs"),
                     "acceptedWithoutFillCount": metrics.get("acceptedWithoutFillCount"),
                     "policyMismatchCount": metrics.get("policyMismatchCount"),
+                    "liveLaneStrategyMismatchCount": metrics.get("liveLaneStrategyMismatchCount"),
+                    "liveLaneDirectionMismatchCount": metrics.get("liveLaneDirectionMismatchCount"),
+                    "liveLaneSymbolMismatchCount": metrics.get("liveLaneSymbolMismatchCount"),
                 },
             }
         )
@@ -495,7 +554,11 @@ def _field_presence(row: Dict[str, Any], source: str, event_type: Any, retcode: 
 
 
 def _field_completeness(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    audited_rows = [row for row in rows if ((row.get("fieldPresence") or {}).get("audited"))]
+    audited_rows = [
+        row
+        for row in rows
+        if ((row.get("fieldPresence") or {}).get("audited")) and not _is_advisory_normalized_row(row)
+    ]
     missing_counts: Dict[str, int] = {}
     row_issues: List[Dict[str, Any]] = []
     required_checks = 0
@@ -615,6 +678,76 @@ def _dedupe_feedback(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen.add(key)
         deduped.append(row)
     return deduped
+
+
+def _recent_feedback(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    execution_rows = [row for row in rows if _is_live_execution_row(row)]
+    return (execution_rows or rows)[-20:]
+
+
+def _is_live_execution_row(row: Dict[str, Any]) -> bool:
+    if _is_advisory_normalized_row(row):
+        return False
+    source = str(row.get("source") or "")
+    if source in ADVISORY_FEEDBACK_SOURCES:
+        return False
+    event_type = str(row.get("eventType") or "").upper()
+    if event_type in SEND_EVENT_TYPES | FILL_EVENT_TYPES | CLOSE_EVENT_TYPES | REJECT_EVENT_TYPES:
+        return True
+    return bool(row.get("fillPrice") or row.get("retcode") or row.get("rejectReason"))
+
+
+def _is_live_lane_entry_row(row: Dict[str, Any]) -> bool:
+    if str(row.get("source") or "") != "QuantGod_LiveExecutionFeedback.jsonl":
+        return False
+    feedback_id = str(row.get("feedbackId") or "")
+    intent_id = str(row.get("intentId") or "")
+    if feedback_id.startswith("history-") or intent_id.startswith("history-"):
+        return False
+    if not _is_live_execution_row(row):
+        return False
+    event_type = str(row.get("eventType") or "").upper()
+    return event_type in LIVE_LANE_ENTRY_EVENT_TYPES
+
+
+def _is_advisory_normalized_row(row: Dict[str, Any]) -> bool:
+    event_type = str(row.get("eventType") or "").strip()
+    if event_type:
+        return False
+    source_keys = row.get("sourceKeys") if isinstance(row.get("sourceKeys"), list) else []
+    normalized_keys = {str(key) for key in source_keys}
+    if normalized_keys & ADVISORY_SOURCE_KEYS:
+        return True
+    feedback_id = str(row.get("feedbackId") or "")
+    has_execution_marker = bool(row.get("fillPrice") or row.get("retcode") or row.get("rejectReason"))
+    return feedback_id.startswith("USDJPY-FEEDBACK-") and not has_execution_marker
+
+
+def _is_allowed_live_lane_strategy(strategy_id: Any) -> bool:
+    normalized = _normalized_token(strategy_id)
+    return normalized == "RSI_REVERSAL" or "RSI_REVERSAL" in normalized or "RSI_REV" in normalized
+
+
+def _is_allowed_live_lane_side(side: Any) -> bool:
+    normalized = str(side or "").strip().upper()
+    return normalized in {"", "BUY", "LONG"}
+
+
+def _is_allowed_live_lane_symbol(symbol: Any) -> bool:
+    normalized = str(symbol or FOCUS_SYMBOL).strip().upper()
+    return "USDJPY" in normalized
+
+
+def _live_lane_mismatch_count(metrics: Dict[str, Any]) -> int:
+    return (
+        int(metrics.get("liveLaneStrategyMismatchCount") or 0)
+        + int(metrics.get("liveLaneDirectionMismatchCount") or 0)
+        + int(metrics.get("liveLaneSymbolMismatchCount") or 0)
+    )
+
+
+def _normalized_token(value: Any) -> str:
+    return str(value or "").strip().upper().replace("-", "_").replace("/", "_").replace(" ", "_")
 
 
 def _first(row: Dict[str, Any], *keys: str) -> Any:
