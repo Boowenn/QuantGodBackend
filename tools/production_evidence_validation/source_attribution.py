@@ -38,6 +38,13 @@ def _looks_like_real_fill(row: dict[str, Any], source_text: str) -> bool:
         return False
     if _has_real_ticket(row):
         return True
+    live_feedback_source = (
+        "QUANTGOD_LIVEEXECUTIONFEEDBACK.JSONL" in source_text
+        or "QUANTGOD_MULTISTRATEGY.MQ5" in source_text
+    )
+    real_fill_event = event_type in {"ORDER_FILL", "ORDER_CLOSE", "LIVE_ENTRY", "LIVE_EXIT", "FILL", "CLOSE", "LIVE_FILL"}
+    if live_feedback_source and real_fill_event:
+        return row.get("fillPrice") not in (None, "", 0, "0")
     if "LIVE" in mode and event_type in {"LIVE_ENTRY", "LIVE_EXIT", "FILL", "CLOSE", "LIVE_FILL"}:
         return row.get("fillPrice") not in (None, "", 0, "0")
     return False

@@ -23,6 +23,12 @@ class ProductionBurnInTests(unittest.TestCase):
                 "source": "QuantGod_LiveExecutionFeedback.jsonl",
             },
             {"sourceKind": "close_history", "source": "QuantGod_CloseHistory.csv"},
+            {
+                "eventType": "ORDER_FILL",
+                "source": "QuantGod_LiveExecutionFeedback.jsonl",
+                "strategyId": "RSI_Reversal",
+                "fillPrice": 157.144,
+            },
             {"sourceKind": "shadow_outcome", "source": "QuantGod_ShadowOutcomeLedger.csv"},
             {"source": "QuantGod_USDJPYEADryRunDecisionLedger.csv"},
             {"source": "QuantGod_LiveExecutionFeedbackHistory.jsonl"},
@@ -30,11 +36,12 @@ class ProductionBurnInTests(unittest.TestCase):
         tiers = [classify_source_tier(row) for row in rows]
         self.assertEqual(tiers[0], "live_real_fill")
         self.assertEqual(tiers[1], "mt5_close_history")
-        self.assertEqual(tiers[2], "strategy_shadow")
-        self.assertEqual(tiers[3], "ea_shadow")
-        self.assertEqual(tiers[4], "backfilled_history")
+        self.assertEqual(tiers[2], "live_real_fill")
+        self.assertEqual(tiers[3], "strategy_shadow")
+        self.assertEqual(tiers[4], "ea_shadow")
+        self.assertEqual(tiers[5], "backfilled_history")
         attribution = build_source_attribution(rows)
-        self.assertEqual(attribution["liveRealFillCount"], 1)
+        self.assertEqual(attribution["liveRealFillCount"], 2)
         self.assertEqual(attribution["shadowSampleCount"], 2)
 
     def test_burn_in_report_writes_report_and_ledger(self) -> None:
