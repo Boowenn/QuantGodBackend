@@ -3,6 +3,7 @@ import unittest
 import os
 from pathlib import Path
 
+from tools.strategy_ga.fitness import _execution_blocks_strategy_ranking
 from tools.strategy_ga.generation_runner import read_candidate, read_candidates, run_generation
 from tools.strategy_ga.telegram_text import ga_to_chinese_text
 from tools.strategy_json.schema import base_strategy_seed
@@ -10,6 +11,24 @@ from tools.strategy_json.validator import validate_strategy_json
 
 
 class StrategyJsonGATests(unittest.TestCase):
+    def test_live_lane_governance_block_does_not_stop_shadow_strategy_ranking(self):
+        self.assertFalse(
+            _execution_blocks_strategy_ranking(
+                {
+                    "promotionGateStatus": "BLOCKED",
+                    "blockerCodes": ["LIVE_LANE_STRATEGY_LOCK_MISMATCH"],
+                }
+            )
+        )
+        self.assertTrue(
+            _execution_blocks_strategy_ranking(
+                {
+                    "promotionGateStatus": "BLOCKED",
+                    "blockerCodes": ["LIVE_EXECUTION_FEEDBACK_FIELD_GAP"],
+                }
+            )
+        )
+
     def test_validator_rejects_execution_primitives_and_live_privileges(self):
         seed = base_strategy_seed("GA-USDJPY-TEST")
         seed["entry"]["conditions"].append("OrderSend()")

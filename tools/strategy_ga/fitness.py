@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 GENERIC_STRATEGY_FAMILIES = {"MA_Cross", "BB_Triple", "MACD_Divergence", "SR_Breakout"}
 
@@ -57,6 +57,7 @@ def evidence_metrics(runtime_dir: Path, seed: Dict[str, Any] | None = None) -> D
     history_production_penalty = _history_production_penalty(history_production)
     execution_metrics = execution.get("metrics") if isinstance(execution.get("metrics"), dict) else {}
     execution_gate = execution.get("promotionGate") if isinstance(execution.get("promotionGate"), dict) else {}
+    execution_blocker_codes = _execution_blocker_codes(execution_gate)
     has_seed_backtest = bool(seed and strategy_backtest)
     backtest_ok = bool(strategy_backtest.get("ok")) if strategy_backtest else False
     backtest_net_r = _num(backtest_metrics.get("netR"), 0)
@@ -129,6 +130,7 @@ def evidence_metrics(runtime_dir: Path, seed: Dict[str, Any] | None = None) -> D
             "sampleCount": int(_num(execution.get("sampleCount"), 0)),
             "promotionGateStatus": execution_gate.get("status") or ("MISSING" if not execution else "UNKNOWN"),
             "promotionAllowed": bool(execution_gate.get("promotionAllowed")) if execution_gate else False,
+            "blockerCodes": execution_blocker_codes,
             "caseMemoryTriggerCount": len(execution.get("caseMemoryTriggers", [])) if isinstance(execution.get("caseMemoryTriggers"), list) else 0,
             "rejectCount": int(_num(execution_metrics.get("rejectCount"), 0)),
             "rejectRatePct": _num(execution_metrics.get("rejectRatePct"), 0),
@@ -237,7 +239,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         blocker = "OVERFIT_RISK"
     elif metrics.get("parity", {}).get("promotionGateStatus") in {"BLOCKED", "MISSING"}:
         blocker = "PARITY_PROMOTION_GATE_BLOCKED"
-    elif metrics.get("executionFeedback", {}).get("promotionGateStatus") == "BLOCKED":
+    elif _execution_blocks_strategy_ranking(metrics.get("executionFeedback", {})):
         blocker = "PARITY_OR_EXECUTION_EVIDENCE_FAILED"
     elif evidence_penalty >= 1.0:
         blocker = "PARITY_OR_EXECUTION_EVIDENCE_FAILED"
@@ -324,11 +326,24 @@ def _case_penalty(cases: Dict[str, Any]) -> float:
         "EXECUTION_REJECT",
         "EXECUTION_SLIPPAGE",
         "EXECUTION_LATENCY",
-        "POLICY_MISMATCH",
     }
     severe_count = sum(int(_num(type_counts.get(name), 0)) for name in execution_types)
     overfit_count = int(_num(type_counts.get("GA_OVERFIT"), 0))
     return round(min(0.5, severe_count * 0.08 + overfit_count * 0.05), 4)
+
+
+def _execution_blocker_codes(execution_gate: Dict[str, Any]) -> List[str]:
+    blockers = execution_gate.get("blockers") if isinstance(execution_gate.get("blockers"), list) else []
+    return [str(row.get("code") or "") for row in blockers if isinstance(row, dict) and row.get("code")]
+
+
+def _execution_blocks_strategy_ranking(execution_feedback: Dict[str, Any]) -> bool:
+    if execution_feedback.get("promotionGateStatus") != "BLOCKED":
+        return False
+    blocker_codes = set(execution_feedback.get("blockerCodes") or [])
+    if blocker_codes and blocker_codes <= {"LIVE_LANE_STRATEGY_LOCK_MISMATCH"}:
+        return False
+    return True
 
 
 def _strategy_contract_shadow_metrics(cases: Dict[str, Any], seed: Dict[str, Any] | None) -> Dict[str, Any]:

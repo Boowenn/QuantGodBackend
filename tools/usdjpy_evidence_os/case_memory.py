@@ -96,6 +96,7 @@ def _cases_from_execution(runtime_dir: Path) -> List[Dict[str, Any]]:
                     str(trigger.get("mutationHint") or "inspect_execution_quality"),
                     priority=str(trigger.get("priority") or "HIGH"),
                     recommended_lane=str(trigger.get("recommendedLane") or "MT5_SHADOW"),
+                    generate_strategy_json_candidate=bool(trigger.get("generateStrategyJsonCandidate", True)),
                 )
             )
     if int(metrics.get("rejectCount") or 0) > 0:
@@ -274,6 +275,7 @@ def _cases_from_strategy_contract_shadow(runtime_dir: Path, rows: List[Dict[str,
                     priority="MEDIUM",
                     recommended_lane="MT5_SHADOW",
                     strategy=str(row.get("strategyFamily") or "RSI_Reversal"),
+                    direction=str(row.get("direction") or "LONG"),
                 )
             )
         elif blocker in {"EA_CONTRACT_FAMILY_NOT_IMPLEMENTED", "EA_CONTRACT_DIRECTION_NOT_LIVE_ROUTE"}:
@@ -286,6 +288,7 @@ def _cases_from_strategy_contract_shadow(runtime_dir: Path, rows: List[Dict[str,
                     priority="MEDIUM",
                     recommended_lane="MT5_SHADOW",
                     strategy=str(row.get("strategyFamily") or "RSI_Reversal"),
+                    direction=str(row.get("direction") or "LONG"),
                 )
             )
         elif blocker in {"CONTRACT_SAFETY_REJECTED", "NON_USDJPY_CONTRACT", "CONTRACT_MODE_REJECTED"}:
@@ -298,6 +301,7 @@ def _cases_from_strategy_contract_shadow(runtime_dir: Path, rows: List[Dict[str,
                     priority="HIGH",
                     recommended_lane="MT5_SHADOW",
                     strategy=str(row.get("strategyFamily") or "RSI_Reversal"),
+                    direction=str(row.get("direction") or "LONG"),
                 )
             )
     return cases
@@ -326,11 +330,14 @@ def _case(
     priority: str | None = None,
     recommended_lane: str = "MT5_SHADOW",
     strategy: str = "RSI_Reversal",
+    direction: str = "LONG",
+    generate_strategy_json_candidate: bool = True,
 ) -> Dict[str, Any]:
     digest = hashlib.sha256(
         f"{case_type}|{root_cause}|{mutation_hint}|{sorted((evidence or {}).items())[:8]}".encode("utf-8", errors="ignore")
     ).hexdigest()[:16]
     priority_value = priority or _default_priority(case_type)
+    status = "QUEUED_FOR_GA" if generate_strategy_json_candidate else "GOVERNANCE_REVIEW"
     return {
         "schema": "quantgod.case_memory.v1",
         "caseId": f"USDJPY-{case_type}-{digest}",
@@ -338,17 +345,21 @@ def _case(
         "type": case_type,
         "symbol": FOCUS_SYMBOL,
         "strategy": strategy or "RSI_Reversal",
+        "strategyFamily": strategy or "RSI_Reversal",
+        "direction": direction or "LONG",
         "priority": priority_value,
         "recommendedLane": recommended_lane,
         "rootCause": root_cause,
         "evidence": evidence,
         "proposedAction": {
-            "generateStrategyJsonCandidate": True,
+            "generateStrategyJsonCandidate": generate_strategy_json_candidate,
             "mutationHint": mutation_hint,
             "recommendedLane": recommended_lane,
             "priority": priority_value,
+            "strategyFamily": strategy or "RSI_Reversal",
+            "direction": direction or "LONG",
         },
-        "status": "QUEUED_FOR_GA",
+        "status": status,
         "safety": dict(SAFETY_BOUNDARY),
     }
 
@@ -364,6 +375,9 @@ def _type_counts(cases: List[Dict[str, Any]]) -> Dict[str, int]:
 def _mutation_hints(cases: List[Dict[str, Any]]) -> List[str]:
     hints: List[str] = []
     for item in cases:
+        action = item.get("proposedAction") if isinstance(item.get("proposedAction"), dict) else {}
+        if action.get("generateStrategyJsonCandidate") is False:
+            continue
         hint = ((item.get("proposedAction") or {}).get("mutationHint") or "")
         if hint and hint not in hints:
             hints.append(str(hint))
@@ -376,6 +390,8 @@ def _ga_seed_hints(cases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     hints: List[Dict[str, Any]] = []
     for item in queued[:24]:
         action = item.get("proposedAction") if isinstance(item.get("proposedAction"), dict) else {}
+        if action.get("generateStrategyJsonCandidate") is False:
+            continue
         hints.append(
             {
                 "caseId": item.get("caseId"),
@@ -383,6 +399,10 @@ def _ga_seed_hints(cases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "priority": item.get("priority") or "MEDIUM",
                 "recommendedLane": item.get("recommendedLane") or action.get("recommendedLane") or "MT5_SHADOW",
                 "mutationHint": action.get("mutationHint") or "case_memory_observe",
+                "strategyFamily": item.get("strategyFamily") or item.get("strategy") or action.get("strategyFamily") or "RSI_Reversal",
+                "strategy": item.get("strategy") or action.get("strategyFamily") or "RSI_Reversal",
+                "direction": item.get("direction") or action.get("direction") or "LONG",
+                "generateStrategyJsonCandidate": True,
                 "reasonZh": item.get("rootCause") or "Case Memory 进入下一代 GA 候选。",
                 "status": "QUEUED_FOR_GA",
             }

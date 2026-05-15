@@ -522,7 +522,11 @@ class USDJPYEvidenceOSTests(unittest.TestCase):
             blocker_codes = {row["code"] for row in execution["promotionGate"]["blockers"]}
             self.assertIn("LIVE_LANE_STRATEGY_LOCK_MISMATCH", blocker_codes)
             self.assertIn("POLICY_MISMATCH", evidence["caseMemory"]["caseTypeCounts"])
-            self.assertIn("verify_live_lane_strategy_lock", evidence["caseMemory"]["mutationHints"])
+            self.assertNotIn("verify_live_lane_strategy_lock", evidence["caseMemory"]["mutationHints"])
+            self.assertEqual(evidence["caseMemory"]["caseMemoryToGA"]["queuedHintCount"], 0)
+            policy_cases = [row for row in evidence["caseMemory"]["cases"] if row.get("type") == "POLICY_MISMATCH"]
+            self.assertEqual(policy_cases[0]["status"], "GOVERNANCE_REVIEW")
+            self.assertFalse(policy_cases[0]["proposedAction"]["generateStrategyJsonCandidate"])
 
     def test_execution_quality_feeds_case_memory_and_ga_penalty(self):
         with tempfile.TemporaryDirectory() as tmp:

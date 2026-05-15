@@ -10,6 +10,18 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     from strategy_json.schema import base_strategy_seed
 
+SUPPORTED_CASE_MEMORY_FAMILIES = {
+    "RSI_Reversal",
+    "MA_Cross",
+    "BB_Triple",
+    "MACD_Divergence",
+    "SR_Breakout",
+    "USDJPY_TOKYO_RANGE_BREAKOUT",
+    "USDJPY_NIGHT_REVERSION_SAFE",
+    "USDJPY_H4_TREND_PULLBACK",
+}
+GOVERNANCE_ONLY_HINTS = {"verify_live_lane_strategy_lock"}
+
 
 def initial_seed_pool(population_size: int = 16) -> List[Dict[str, Any]]:
     """Create deterministic Strategy JSON seeds for the first GA generation."""
@@ -176,17 +188,20 @@ def case_memory_seed_pool(runtime_dir: Path, limit: int = 6) -> List[Dict[str, A
     """Turn Case Memory into safe Strategy JSON seeds for GA shadow research."""
     cases = _load_case_memory(runtime_dir)
     seeds: List[Dict[str, Any]] = []
-    for index, case in enumerate(cases[:limit], start=1):
+    strategy_cases = [case for case in cases if _is_strategy_seed_case(case)]
+    for index, case in enumerate(strategy_cases[:limit], start=1):
         action = case.get("proposedAction") if isinstance(case.get("proposedAction"), dict) else {}
         hint = str(case.get("mutationHint") or action.get("mutationHint") or "case_memory_observe")
-        seed = base_strategy_seed(f"GA-USDJPY-CASE-{index:04d}", family="RSI_Reversal", direction="LONG")
+        family = _case_strategy_family(case)
+        direction = _case_direction(case)
+        seed = base_strategy_seed(f"GA-USDJPY-CASE-{index:04d}", family=family, direction=direction)
         seed["source"] = "CASE_MEMORY"
         seed["caseId"] = case.get("caseId")
         seed["caseType"] = case.get("caseType") or case.get("type")
         seed["casePriority"] = case.get("priority") or action.get("priority") or "MEDIUM"
         seed["caseReasonZh"] = case.get("reasonZh") or case.get("rootCause")
         seed["mutationHint"] = hint
-        seed["strategyId"] = f"USDJPY_RSI_REVERSAL_LONG_CASE_{hint.upper()}_{index:03d}"
+        seed["strategyId"] = f"USDJPY_{_strategy_id_token(family)}_{direction}_CASE_{_strategy_id_token(hint)}_{index:03d}"
         _apply_case_hint(seed, hint)
         seeds.append(seed)
     return seeds
@@ -210,6 +225,43 @@ def _load_case_memory(runtime_dir: Path) -> List[Dict[str, Any]]:
     except Exception:
         pass
     return []
+
+
+def _is_strategy_seed_case(case: Dict[str, Any]) -> bool:
+    action = case.get("proposedAction") if isinstance(case.get("proposedAction"), dict) else {}
+    hint = str(case.get("mutationHint") or action.get("mutationHint") or "")
+    if action.get("generateStrategyJsonCandidate") is False or case.get("generateStrategyJsonCandidate") is False:
+        return False
+    return hint not in GOVERNANCE_ONLY_HINTS
+
+
+def _case_strategy_family(case: Dict[str, Any]) -> str:
+    action = case.get("proposedAction") if isinstance(case.get("proposedAction"), dict) else {}
+    raw = (
+        case.get("strategyFamily")
+        or case.get("strategy")
+        or action.get("strategyFamily")
+        or action.get("strategy")
+        or "RSI_Reversal"
+    )
+    family = str(raw or "RSI_Reversal")
+    return family if family in SUPPORTED_CASE_MEMORY_FAMILIES else "RSI_Reversal"
+
+
+def _case_direction(case: Dict[str, Any]) -> str:
+    action = case.get("proposedAction") if isinstance(case.get("proposedAction"), dict) else {}
+    raw = str(case.get("direction") or action.get("direction") or "LONG").upper()
+    return raw if raw in {"LONG", "SHORT"} else "LONG"
+
+
+def _strategy_id_token(value: str) -> str:
+    return (
+        str(value or "")
+        .upper()
+        .replace("-", "_")
+        .replace("/", "_")
+        .replace(" ", "_")
+    )
 
 
 def _apply_case_hint(seed: Dict[str, Any], hint: str) -> None:

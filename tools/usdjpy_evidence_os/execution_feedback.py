@@ -353,7 +353,16 @@ def _promotion_gate(
     blockers: List[Dict[str, Any]] = []
     warnings: List[Dict[str, Any]] = []
 
-    def add_blocker(code: str, reason: str, value: Any, limit: Any, case_type: str, mutation_hint: str) -> None:
+    def add_blocker(
+        code: str,
+        reason: str,
+        value: Any,
+        limit: Any,
+        case_type: str,
+        mutation_hint: str,
+        *,
+        generate_strategy_json_candidate: bool = True,
+    ) -> None:
         blockers.append(
             {
                 "code": code,
@@ -362,6 +371,7 @@ def _promotion_gate(
                 "limit": limit,
                 "caseType": case_type,
                 "mutationHint": mutation_hint,
+                "generateStrategyJsonCandidate": generate_strategy_json_candidate,
             }
         )
 
@@ -387,6 +397,7 @@ def _promotion_gate(
             0,
             "POLICY_MISMATCH",
             "verify_live_lane_strategy_lock",
+            generate_strategy_json_candidate=False,
         )
     if int(metrics.get("acceptedWithoutFillCount") or 0) > 5:
         add_blocker(
@@ -496,6 +507,7 @@ def _case_memory_triggers(metrics: Dict[str, Any], promotion_gate: Dict[str, Any
                     "liveLaneDirectionMismatchCount": metrics.get("liveLaneDirectionMismatchCount"),
                     "liveLaneSymbolMismatchCount": metrics.get("liveLaneSymbolMismatchCount"),
                 },
+                "generateStrategyJsonCandidate": bool(blocker.get("generateStrategyJsonCandidate", True)),
             }
         )
     return triggers
