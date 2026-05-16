@@ -269,20 +269,29 @@ class Mt5RsiExitProtectionTests(unittest.TestCase):
         self.assertIn("QG_MT5_PYTHON_BIN", launcher_text)
         self.assertIn("QG_MT5_MAX_BARS", launcher_text)
         self.assertIn("patch_ini_section_key", launcher_text)
-        self.assertIn('patch_ini_section_key "$MT5_LIVE_CONFIG" "Charts" "MaxBars" "$QG_MT5_MAX_BARS"', launcher_text)
+        self.assertIn('patch_ini_section_key "$target_config" "Charts" "MaxBars" "$max_bars"', launcher_text)
+        self.assertIn('prepare_live_config "$MT5_LIVE_CONFIG" "$MT5_START_SYMBOL" "$QG_MT5_MAX_BARS"', launcher_text)
         self.assertIn('patch_ini_section_key "$MT5_SHADOW_CONFIG" "Charts" "MaxBars" "$QG_MT5_MAX_BARS"', launcher_text)
         self.assertIn("terminal.ini", launcher_text)
         self.assertIn("QG_USDJPY_HISTORY_SYNC_ENABLED", launcher_text)
         self.assertIn("QG_USDJPY_HISTORY_MAX_LAG_HOURS", launcher_text)
         self.assertIn("MT5_SHADOW_SCREEN", launcher_text)
         self.assertIn("MT5_LIVE_SCREEN", launcher_text)
+        self.assertIn("MT5_SECONDARY_SCREEN", launcher_text)
+        self.assertIn('MT5_SECONDARY_ENABLED="${QG_MT5_SECONDARY_ENABLED:-0}"', launcher_text)
+        self.assertIn("QG_MT5_SECONDARY_WINE_PREFIX", launcher_text)
+        self.assertIn("QG_MT5_SECONDARY_LOGIN", launcher_text)
+        self.assertIn("QG_MT5_SECONDARY_SERVER", launcher_text)
+        self.assertIn("QuantGod_MT5_HFM_LiveSecondary_mac.ini", launcher_text)
+        self.assertIn("prepare_live_config", launcher_text)
         self.assertIn("terminal64.exe /portable", launcher_text)
         self.assertIn("QuantGod_MT5_HFM_Shadow_mac.ini", launcher_text)
         self.assertIn("QuantGod_MT5_HFM_LivePilot_mac.ini", launcher_text)
+        self.assertNotIn("Password=", launcher_text)
         self.assertIn("AllowLiveTrading=0", launcher_text)
         self.assertTrue(
             launcher_text.rstrip().endswith(
-                'echo "Screens: $BACKEND_API_SCREEN, $FRONTEND_SCREEN, $AGENT_V25_SUPERVISOR_SCREEN, $AGENT_V25_SCREEN, $HISTORY_SYNC_SCREEN, $MT5_LIVE_SCREEN"'
+                'echo "Screens: $BACKEND_API_SCREEN, $FRONTEND_SCREEN, $AGENT_V25_SUPERVISOR_SCREEN, $AGENT_V25_SCREEN, $HISTORY_SYNC_SCREEN, $MT5_LIVE_SCREEN, $MT5_SECONDARY_SCREEN"'
             )
         )
 

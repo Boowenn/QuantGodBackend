@@ -12,6 +12,7 @@ Dashboard/vue-dist/
 Dashboard/quantgod_cloud_sync.json
 Dashboard/QuantGod_*.json
 Dashboard/QuantGod_*.csv
+Dashboard/QuantGod_*.db
 Dashboard/QuantGod_*.txt
 Dashboard/adaptive/
 Dashboard/agent/

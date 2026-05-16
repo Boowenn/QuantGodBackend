@@ -419,6 +419,9 @@ datetime g_lastNewsRefresh = 0;
 datetime g_lastFullExport = 0;
 datetime g_lastPilotTick = 0;
 datetime g_lastUsdJpyKlineExport = 0;
+datetime g_nextStartupWarmupLog = 0;
+datetime g_startupWarmupUntil = 0;
+bool g_fullRuntimeInitialized = false;
 
 struct TradeRetryState
 {
@@ -9177,15 +9180,63 @@ void ReconcileDailyRealizedLossFromHistory()
       Print("QuantGod reconcile: restored realizedLossToday=", DoubleToString(realizedLoss, 2), " from history");
 }
 
-int OnInit()
+void WriteStartupWarmupHeartbeat(string context, string reason)
 {
+   string timerHeartbeat = "localTime=" + FormatDateTime(TimeLocal(), true) + "\r\n";
+   timerHeartbeat += "serverTime=" + FormatDateTime(CurrentServerTime(), true) + "\r\n";
+   timerHeartbeat += "refreshIntervalSeconds=" + IntegerToString(MathMax(1, RefreshIntervalSec)) + "\r\n";
+   timerHeartbeat += "context=" + context + "\r\n";
+   timerHeartbeat += "status=MARKET_DATA_SYNCING\r\n";
+   timerHeartbeat += "reason=" + reason + "\r\n";
+   timerHeartbeat += "focusSymbol=" + g_focusSymbol + "\r\n";
+   timerHeartbeat += "warmupUntil=" + (g_startupWarmupUntil > 0 ? FormatDateTime(g_startupWarmupUntil, true) : "") + "\r\n";
+   timerHeartbeat += "account=" + IntegerToString((int)AccountInfoInteger(ACCOUNT_LOGIN)) + "\r\n";
+   timerHeartbeat += "server=" + AccountInfoString(ACCOUNT_SERVER) + "\r\n";
+   WriteTextFile("QuantGod_MT5_TimerHeartbeat.txt", timerHeartbeat);
+}
+
+bool StartupWarmupActive(string context)
+{
+   datetime now = TimeLocal();
+   if(g_startupWarmupUntil <= 0 || now >= g_startupWarmupUntil)
+      return false;
+
+   string reason = "defer heavy export until market data warmup window ends";
+   WriteStartupWarmupHeartbeat(context, reason);
+   if(now >= g_nextStartupWarmupLog)
+   {
+      Print("QuantGod startup warmup waiting: ", reason);
+      g_nextStartupWarmupLog = now + 30;
+   }
+   return true;
+}
+
+void InitializeWarmupWatchlist()
+{
+   ArrayResize(g_symbols, 0);
+   ArrayResize(g_requestedSymbols, 0);
+   string symbol = _Symbol;
+   if(StringLen(symbol) == 0)
+      symbol = "USDJPYc";
+   PushString(g_requestedSymbols, Watchlist);
+   PushString(g_symbols, symbol);
+   g_focusSymbol = symbol;
+   g_resolvedWatchlist = symbol;
+   g_detectedSuffix = "";
+   if(StringLen(symbol) > 6)
+      g_detectedSuffix = StringSubstr(symbol, 6);
+}
+
+bool EnsureFullRuntimeInitialized()
+{
+   if(g_fullRuntimeInitialized)
+      return true;
+
    InitializeWatchlist();
    ArmPilotStartupEntryGuard();
    LoadTrackedUsdCalendarEvents();
-   int timerSeconds = MathMax(1, RefreshIntervalSec);
-   ResetLastError();
-   if(!EventSetTimer(timerSeconds))
-      Print("QuantGod timer setup failed. seconds=", timerSeconds, " err=", GetLastError());
+   g_fullRuntimeInitialized = true;
+
    string startupReason = "";
    bool startupGuardActive = PilotStartupEntryGuardBlocks(g_focusSymbol, startupReason);
    Print("QuantGod MT5 runtime initialized. Focus symbol=", g_focusSymbol,
@@ -9195,7 +9246,20 @@ int OnInit()
          " nonRsiLegacyLiveAuthorization=", NonRsiLegacyLiveAuthorizationState(),
          " startupEntryGuard=", (startupGuardActive ? "ACTIVE" : "CLEAR"),
          " startupReason=", startupReason);
-   ExportDashboard(false);
+   return true;
+}
+
+int OnInit()
+{
+   InitializeWarmupWatchlist();
+   int timerSeconds = MathMax(1, RefreshIntervalSec);
+   ResetLastError();
+   if(!EventSetTimer(timerSeconds))
+      Print("QuantGod timer setup failed. seconds=", timerSeconds, " err=", GetLastError());
+   g_startupWarmupUntil = TimeLocal() + MathMax(60, MathMax(1, RefreshIntervalSec) * 36);
+   WriteStartupWarmupHeartbeat("OnInit", "defer heavy export until market data warmup window ends");
+   Print("QuantGod MT5 runtime warmup armed. Focus symbol=", g_focusSymbol,
+         " warmupUntil=", FormatDateTime(g_startupWarmupUntil, true));
    return(INIT_SUCCEEDED);
 }
 
@@ -9206,6 +9270,10 @@ void OnDeinit(const int reason)
 
 void OnTick()
 {
+   if(!EnsureFullRuntimeInitialized())
+      return;
+   bool startupWarmupActive = StartupWarmupActive("OnTick");
+
    datetime now = TimeCurrent();
    RefreshAutonomousConfigPatchRuntimeAdapter();
 
@@ -9214,6 +9282,9 @@ void OnTick()
    ManagePilotRsiFailFastStops();
    if(g_pilotKillSwitch && PilotCloseOnKillSwitch)
       ClosePilotPositions(g_pilotKillReason);
+
+   if(startupWarmupActive)
+      return;
 
    // Strategy evaluation: 1s cadence
    if(now - g_lastPilotTick >= 1)
@@ -9233,6 +9304,11 @@ void OnTick()
 
 void OnTimer()
 {
+   if(StartupWarmupActive("OnTimer"))
+      return;
+   if(!EnsureFullRuntimeInitialized())
+      return;
+
    // Timer exports are read-only. Live strategy evaluation stays on OnTick so a
    // no-tick/weekend timer cannot stall dashboard freshness or trigger orders.
    ExportDashboard(false);

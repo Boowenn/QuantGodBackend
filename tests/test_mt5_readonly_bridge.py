@@ -440,6 +440,30 @@ class Mt5ReadOnlyBridgeTests(unittest.TestCase):
         self.assertEqual(positions["positions"]["items"][0]["ticket"], 621204078)
         self.assertTrue(positions["source"]["fresh"])
 
+    def test_explicit_only_runtime_candidates_skip_default_fallbacks(self):
+        keys = [
+            "QG_RUNTIME_DIR",
+            "QG_MT5_FILES_DIR",
+            "QG_HFM_FILES_DIR",
+            "QG_MT5_EA_SNAPSHOT_EXPLICIT_ONLY",
+        ]
+        old_values = {key: os.environ.get(key) for key in keys}
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            try:
+                os.environ["QG_RUNTIME_DIR"] = tmp_dir
+                os.environ["QG_MT5_FILES_DIR"] = ""
+                os.environ["QG_HFM_FILES_DIR"] = ""
+                os.environ["QG_MT5_EA_SNAPSHOT_EXPLICIT_ONLY"] = "1"
+                candidates = bridge.runtime_dir_candidates()
+            finally:
+                for key, value in old_values.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+        self.assertEqual(candidates, [Path(tmp_dir)])
+
 
 if __name__ == "__main__":
     unittest.main()

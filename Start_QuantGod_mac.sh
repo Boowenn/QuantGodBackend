@@ -94,6 +94,23 @@ path.write_text("\n".join(out) + "\n", encoding=encoding)
 PY
 }
 
+prepare_live_config() {
+  local target_config="$1"
+  local symbol="$2"
+  local max_bars="$3"
+  local login="${4:-}"
+  local server="${5:-}"
+  cp MQL5/Config/QuantGod_MT5_HFM_LivePilot.ini "$target_config"
+  patch_ini_key "$target_config" "Symbol" "$symbol"
+  if [[ -n "$login" ]]; then
+    patch_ini_key "$target_config" "Login" "$login"
+  fi
+  if [[ -n "$server" ]]; then
+    patch_ini_key "$target_config" "Server" "$server"
+  fi
+  patch_ini_section_key "$target_config" "Charts" "MaxBars" "$max_bars"
+}
+
 start_screen() {
   local name="$1"
   local log_file="$2"
@@ -182,6 +199,17 @@ MT5_PRESETS="$MT5_MQL5/Presets"
 WINE64="$MT5_APP_PATH/Contents/SharedSupport/wine/bin/wine64"
 MT5_SHADOW_CONFIG="$MT5_PREFIX/drive_c/qg/QuantGod_MT5_HFM_Shadow_mac.ini"
 MT5_LIVE_CONFIG="$MT5_PREFIX/drive_c/qg/QuantGod_MT5_HFM_LivePilot_mac.ini"
+MT5_SECONDARY_PREFIX="${QG_MT5_SECONDARY_WINE_PREFIX:-}"
+MT5_SECONDARY_ROOT="${QG_MT5_SECONDARY_ROOT:-}"
+if [[ -z "$MT5_SECONDARY_ROOT" && -n "$MT5_SECONDARY_PREFIX" ]]; then
+  MT5_SECONDARY_ROOT="$MT5_SECONDARY_PREFIX/drive_c/Program Files/MetaTrader 5"
+fi
+MT5_SECONDARY_MQL5="${MT5_SECONDARY_ROOT:+$MT5_SECONDARY_ROOT/MQL5}"
+MT5_SECONDARY_FILES="${MT5_SECONDARY_MQL5:+$MT5_SECONDARY_MQL5/Files}"
+MT5_SECONDARY_EXPERTS="${MT5_SECONDARY_MQL5:+$MT5_SECONDARY_MQL5/Experts}"
+MT5_SECONDARY_PRESETS="${MT5_SECONDARY_MQL5:+$MT5_SECONDARY_MQL5/Presets}"
+MT5_SECONDARY_CONFIG_NAME="${QG_MT5_SECONDARY_CONFIG_NAME:-QuantGod_MT5_HFM_LiveSecondary_mac.ini}"
+MT5_SECONDARY_CONFIG="${MT5_SECONDARY_PREFIX:+$MT5_SECONDARY_PREFIX/drive_c/qg/$MT5_SECONDARY_CONFIG_NAME}"
 
 export QG_MT5_TERMINAL_PATH="${QG_MT5_TERMINAL_PATH:-$MT5_ROOT/terminal64.exe}"
 export QG_MT5_PYTHON_BIN="${QG_MT5_PYTHON_BIN:-$QG_PYTHON_BIN}"
@@ -199,6 +227,7 @@ export QG_MT5_TESTER_ROOT="${QG_MT5_TESTER_ROOT:-$QG_PARAMLAB_TESTER_ROOT}"
 
 MT5_SHADOW_SCREEN="${QG_MT5_SHADOW_SCREEN:-quantgod-mt5-shadow}"
 MT5_LIVE_SCREEN="${QG_MT5_LIVE_SCREEN:-quantgod-mt5-live}"
+MT5_SECONDARY_SCREEN="${QG_MT5_SECONDARY_SCREEN:-quantgod-mt5-live-secondary}"
 BACKEND_API_SCREEN="${QG_BACKEND_API_SCREEN:-quantgod-backend-api}"
 FRONTEND_SCREEN="${QG_FRONTEND_SCREEN:-quantgod-frontend-dev}"
 AGENT_V25_SCREEN="${QG_AGENT_V25_SCREEN:-quantgod-agent-v25}"
@@ -210,6 +239,10 @@ RUNTIME_SOURCE="${QG_MAC_RUNTIME_SOURCE:-auto}"
 MT5_START_MODE="${QG_MT5_START_MODE:-live}"
 MT5_LIVE_LAUNCH_ALLOWED="${QG_MT5_LIVE_LAUNCH_ALLOWED:-1}"
 MT5_START_SYMBOL="${QG_MT5_START_SYMBOL:-USDJPYc}"
+MT5_SECONDARY_ENABLED="${QG_MT5_SECONDARY_ENABLED:-0}"
+MT5_SECONDARY_LOGIN="${QG_MT5_SECONDARY_LOGIN:-}"
+MT5_SECONDARY_SERVER="${QG_MT5_SECONDARY_SERVER:-}"
+MT5_SECONDARY_SYMBOL="${QG_MT5_SECONDARY_SYMBOL:-$MT5_START_SYMBOL}"
 BACKEND_API_ENABLED="${QG_BACKEND_API_ENABLED:-1}"
 FRONTEND_ENABLED="${QG_FRONTEND_ENABLED:-1}"
 AGENT_V25_ENABLED="${QG_AGENT_V25_ENABLED:-1}"
@@ -233,6 +266,10 @@ echo "Focus symbol: $QG_FOCUS_SYMBOL"
 echo "MT5 start mode: $MT5_START_MODE"
 echo "MT5 start symbol: $MT5_START_SYMBOL"
 echo "MT5 live launch allowed: $MT5_LIVE_LAUNCH_ALLOWED"
+echo "MT5 secondary live instance: $MT5_SECONDARY_ENABLED"
+if [[ "$MT5_SECONDARY_ENABLED" == "1" ]]; then
+  echo "MT5 secondary root: ${MT5_SECONDARY_ROOT:-not configured}"
+fi
 echo "MT5 terminal path: $QG_MT5_TERMINAL_PATH"
 echo "MT5 Python bin: $QG_MT5_PYTHON_BIN"
 echo "MT5 chart max bars: $QG_MT5_MAX_BARS"
@@ -299,9 +336,7 @@ if [[ -d "$MT5_ROOT" ]]; then
     if [[ "$MT5_START_MODE" == "off" ]]; then
       echo "MT5 launch skipped because QG_MT5_START_MODE=off."
     elif [[ "$MT5_START_MODE" == "live" ]]; then
-      cp MQL5/Config/QuantGod_MT5_HFM_LivePilot.ini "$MT5_LIVE_CONFIG"
-      patch_ini_key "$MT5_LIVE_CONFIG" "Symbol" "$MT5_START_SYMBOL"
-      patch_ini_section_key "$MT5_LIVE_CONFIG" "Charts" "MaxBars" "$QG_MT5_MAX_BARS"
+      prepare_live_config "$MT5_LIVE_CONFIG" "$MT5_START_SYMBOL" "$QG_MT5_MAX_BARS"
       echo "Live MT5 config prepared at $MT5_LIVE_CONFIG."
       if [[ "$MT5_LIVE_LAUNCH_ALLOWED" != "1" ]]; then
         echo "Live launch is locked. Set QG_MT5_LIVE_LAUNCH_ALLOWED=1 after checking live risk controls."
@@ -310,6 +345,43 @@ if [[ -d "$MT5_ROOT" ]]; then
         quit_screen "$MT5_SHADOW_SCREEN"
         start_screen "$MT5_LIVE_SCREEN" "$SCRIPT_DIR/runtime/mt5_hfm_livepilot_screen.log" \
           "cd '$MT5_ROOT' && exec env WINEPREFIX='$MT5_PREFIX' '$WINE64' terminal64.exe /portable '/config:C:\\qg\\QuantGod_MT5_HFM_LivePilot_mac.ini'"
+        if [[ "$MT5_SECONDARY_ENABLED" == "1" ]]; then
+          if [[ -z "$MT5_SECONDARY_PREFIX" || -z "$MT5_SECONDARY_ROOT" ]]; then
+            echo "Secondary MT5 is enabled but QG_MT5_SECONDARY_WINE_PREFIX/QG_MT5_SECONDARY_ROOT is not configured."
+          elif [[ "$MT5_SECONDARY_PREFIX" == "$MT5_PREFIX" || "$MT5_SECONDARY_ROOT" == "$MT5_ROOT" ]]; then
+            echo "Secondary MT5 launch locked: it must use a separate Wine prefix/root from the primary instance."
+          elif [[ -z "$MT5_SECONDARY_LOGIN" || -z "$MT5_SECONDARY_SERVER" ]]; then
+            echo "Secondary MT5 is enabled but QG_MT5_SECONDARY_LOGIN/QG_MT5_SECONDARY_SERVER is not configured."
+          elif [[ ! -d "$MT5_SECONDARY_ROOT" ]]; then
+            echo "Secondary MT5 data folder not found yet: $MT5_SECONDARY_ROOT"
+            echo "Create/open the second portable MT5 instance once, then run this script again."
+          else
+            echo "Syncing QuantGod files into secondary MT5..."
+            mkdir -p "$MT5_SECONDARY_FILES" "$MT5_SECONDARY_EXPERTS" "$MT5_SECONDARY_PRESETS" "$MT5_SECONDARY_PREFIX/drive_c/qg"
+            rsync -a Dashboard/vue-dist/ "$MT5_SECONDARY_FILES/vue-dist/" || true
+            cp Dashboard/dashboard_server.js "$MT5_SECONDARY_FILES/dashboard_server.js"
+            rsync -a --include='QuantGod_*' --include='*/' --exclude='*' Dashboard/ "$MT5_SECONDARY_FILES/"
+            if [[ -d "$QG_MT5_FILES_DIR" ]]; then
+              SRC_MT5_FILES="$(cd "$QG_MT5_FILES_DIR" && pwd -P)"
+              DST_MT5_FILES="$(cd "$MT5_SECONDARY_FILES" && pwd -P)"
+              if [[ "$SRC_MT5_FILES" != "$DST_MT5_FILES" ]]; then
+                rsync -a --include='QuantGod_*' --include='*/' --exclude='*' "$QG_MT5_FILES_DIR/" "$MT5_SECONDARY_FILES/"
+              fi
+            fi
+            cp MQL5/Experts/QuantGod_MultiStrategy.mq5 "$MT5_SECONDARY_EXPERTS/QuantGod_MultiStrategy.mq5"
+            if [[ -f MQL5/Experts/QuantGod_MultiStrategy.ex5 ]]; then
+              cp MQL5/Experts/QuantGod_MultiStrategy.ex5 "$MT5_SECONDARY_EXPERTS/QuantGod_MultiStrategy.ex5"
+            fi
+            rsync -a MQL5/Presets/ "$MT5_SECONDARY_PRESETS/"
+            prepare_live_config "$MT5_SECONDARY_CONFIG" "$MT5_SECONDARY_SYMBOL" "$QG_MT5_MAX_BARS" "$MT5_SECONDARY_LOGIN" "$MT5_SECONDARY_SERVER"
+            if [[ -f "$MT5_SECONDARY_ROOT/config/terminal.ini" ]]; then
+              patch_ini_section_key "$MT5_SECONDARY_ROOT/config/terminal.ini" "Charts" "MaxBars" "$QG_MT5_MAX_BARS"
+            fi
+            echo "Secondary live MT5 config prepared at $MT5_SECONDARY_CONFIG."
+            start_screen "$MT5_SECONDARY_SCREEN" "$SCRIPT_DIR/runtime/mt5_hfm_secondary_live_screen.log" \
+              "cd '$MT5_SECONDARY_ROOT' && exec env WINEPREFIX='$MT5_SECONDARY_PREFIX' '$WINE64' terminal64.exe /portable '/config:C:\\qg\\$MT5_SECONDARY_CONFIG_NAME'"
+          fi
+        fi
       fi
     else
       echo "Starting MT5 with the read-only HFM shadow config..."
@@ -357,4 +429,4 @@ open "http://$QG_FRONTEND_HOST:$QG_FRONTEND_PORT/vue/?workspace=mt5" || \
   open "http://$QG_DASHBOARD_HOST:$QG_DASHBOARD_PORT/vue/?workspace=mt5" || true
 
 echo "QuantGod v2.5 launcher complete."
-echo "Screens: $BACKEND_API_SCREEN, $FRONTEND_SCREEN, $AGENT_V25_SUPERVISOR_SCREEN, $AGENT_V25_SCREEN, $HISTORY_SYNC_SCREEN, $MT5_LIVE_SCREEN"
+echo "Screens: $BACKEND_API_SCREEN, $FRONTEND_SCREEN, $AGENT_V25_SUPERVISOR_SCREEN, $AGENT_V25_SCREEN, $HISTORY_SYNC_SCREEN, $MT5_LIVE_SCREEN, $MT5_SECONDARY_SCREEN"

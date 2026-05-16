@@ -119,7 +119,8 @@ test('Mac MT5 startup raises MaxBars so M1 CopyRates can reach 6-12 months', () 
     'QG_MT5_MAX_BARS',
     '1000000',
     'patch_ini_section_key',
-    'patch_ini_section_key "$MT5_LIVE_CONFIG" "Charts" "MaxBars" "$QG_MT5_MAX_BARS"',
+    'prepare_live_config "$MT5_LIVE_CONFIG" "$MT5_START_SYMBOL" "$QG_MT5_MAX_BARS"',
+    'patch_ini_section_key "$target_config" "Charts" "MaxBars" "$max_bars"',
     'patch_ini_section_key "$MT5_SHADOW_CONFIG" "Charts" "MaxBars" "$QG_MT5_MAX_BARS"',
     'terminal.ini',
   ]) {

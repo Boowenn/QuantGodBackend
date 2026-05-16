@@ -387,7 +387,7 @@ function runSingleMarketAnalyzer() {
   });
 }
 
-function runJsonPython(script, args = [], timeoutMs = 15000) {
+function runJsonPython(script, args = [], timeoutMs = 15000, extraEnv = {}) {
   return new Promise((resolve) => {
     if (!fs.existsSync(script)) {
       resolve({ ok: false, skipped: true, reason: 'script_not_found', script });
@@ -396,7 +396,7 @@ function runJsonPython(script, args = [], timeoutMs = 15000) {
     const child = spawn(pythonBin, [script, ...args], {
       cwd: repoRoot,
       windowsHide: true,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+      env: { ...process.env, ...extraEnv, PYTHONIOENCODING: 'utf-8' }
     });
     let settled = false;
     let stdout = '';
@@ -659,9 +659,9 @@ function parseMt5AuthorizationLine(line, dateName = '') {
   return null;
 }
 
-function readMt5TerminalStatus() {
+function readMt5TerminalStatus(rootOverride = '') {
   if (process.platform !== 'darwin') return null;
-  const root = getMacMt5RootDir();
+  const root = rootOverride || getMacMt5RootDir();
   if (!fs.existsSync(root)) return null;
   const candidates = recentMt5LogDateNames(4).flatMap((dateName) => [
     path.join(root, 'logs', `${dateName}.log`),
@@ -742,7 +742,54 @@ function buildMt5ReadonlyArgs(endpoint, parsedUrl) {
   return args;
 }
 
-async function handleMt5Readonly(req, res, endpoint) {
+function secondaryMt5FilesDir() {
+  const candidates = [
+    process.env.QG_MT5_SECONDARY_FILES_DIR,
+    process.env.QG_MT5_SECONDARY_ROOT
+      ? path.join(process.env.QG_MT5_SECONDARY_ROOT, 'MQL5', 'Files')
+      : '',
+    process.env.QG_MT5_SECONDARY_WINE_PREFIX
+      ? path.join(
+          process.env.QG_MT5_SECONDARY_WINE_PREFIX,
+          'drive_c',
+          'Program Files',
+          'MetaTrader 5',
+          'MQL5',
+          'Files'
+        )
+      : '',
+    path.join(
+      os.homedir(),
+      'Library',
+      'Application Support',
+      'net.metaquotes.wine.metatrader5-live16',
+      'drive_c',
+      'Program Files',
+      'MetaTrader 5',
+      'MQL5',
+      'Files'
+    )
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || '';
+}
+
+function secondaryMt5RootDir() {
+  const filesDir = secondaryMt5FilesDir();
+  return filesDir ? path.resolve(filesDir, '..', '..') : '';
+}
+
+function mt5ReadonlyEnv(scope = 'primary') {
+  if (scope !== 'secondary') return {};
+  const filesDir = secondaryMt5FilesDir();
+  if (!filesDir) return null;
+  return {
+    QG_RUNTIME_DIR: filesDir,
+    QG_MT5_FILES_DIR: filesDir,
+    QG_MT5_EA_SNAPSHOT_EXPLICIT_ONLY: '1'
+  };
+}
+
+async function handleMt5Readonly(req, res, endpoint, options = {}) {
   if (!mt5ReadonlyEndpoints.has(endpoint)) {
     sendJson(res, 404, {
       ok: false,
@@ -763,15 +810,43 @@ async function handleMt5Readonly(req, res, endpoint) {
     return;
   }
   const normalizedEndpoint = endpoint;
+  const scope = options.scope === 'secondary' ? 'secondary' : 'primary';
+  const extraEnv = mt5ReadonlyEnv(scope);
+  if (extraEnv === null) {
+    sendJson(res, 200, {
+      ok: false,
+      status: 'UNCONFIGURED',
+      endpoint: normalizedEndpoint,
+      scope,
+      error: 'secondary_mt5_runtime_not_found',
+      safety: {
+        readOnly: true,
+        orderSendAllowed: false,
+        closeAllowed: false,
+        cancelAllowed: false,
+        credentialStorageAllowed: false,
+        livePresetMutationAllowed: false,
+        mutatesMt5: false
+      }
+    });
+    return;
+  }
   try {
     const parsed = new URL(req.url || '/', `http://${host}:${port}`);
-    const result = await runJsonPython(mt5ReadonlyBridgeScript, buildMt5ReadonlyArgs(normalizedEndpoint, parsed), 12000);
+    const result = await runJsonPython(
+      mt5ReadonlyBridgeScript,
+      buildMt5ReadonlyArgs(normalizedEndpoint, parsed),
+      12000,
+      extraEnv
+    );
     if (!result.ok) {
-      const terminal = readMt5TerminalStatus();
+      const terminal =
+        scope === 'secondary' ? readMt5TerminalStatus(secondaryMt5RootDir()) : readMt5TerminalStatus();
       sendJson(res, 200, {
         ok: false,
         status: 'UNAVAILABLE',
         endpoint: normalizedEndpoint,
+        scope,
         error: result.stderr || result.reason || 'mt5_readonly_bridge_failed',
         detail: result,
         ...(terminal ? { terminal } : {}),
@@ -788,15 +863,21 @@ async function handleMt5Readonly(req, res, endpoint) {
       return;
     }
     const payload = result.payload && typeof result.payload === 'object' ? result.payload : {};
-    const terminal = payload?.ok === false || String(payload?.status || '').toUpperCase() === 'UNAVAILABLE'
-      ? readMt5TerminalStatus()
-      : null;
+    const terminal =
+      (payload?.ok === false || String(payload?.status || '').toUpperCase() === 'UNAVAILABLE')
+        ? scope === 'secondary'
+          ? readMt5TerminalStatus(secondaryMt5RootDir())
+          : readMt5TerminalStatus()
+        : null;
     sendJson(res, 200, {
       ...payload,
+      scope,
       ...(terminal ? { terminal } : {}),
       _api: {
         service: 'quantgod_dashboard_mt5_readonly_bridge',
-        endpoint: `/api/mt5-readonly/${normalizedEndpoint}`,
+        endpoint: scope === 'secondary'
+          ? `/api/mt5-readonly-secondary/${normalizedEndpoint}`
+          : `/api/mt5-readonly/${normalizedEndpoint}`,
         script: mt5ReadonlyBridgeScript,
         readOnly: true,
         orderSendAllowed: false,
@@ -3477,6 +3558,16 @@ const server = http.createServer((req, res) => {
     const pathPart = requestUrl.split('?')[0];
     const endpoint = pathPart === '/api/mt5-readonly' ? 'snapshot' : path.basename(pathPart);
     handleMt5Readonly(req, res, endpoint);
+    return;
+  }
+  if (
+    req.method === 'GET' &&
+    (requestUrl.split('?')[0] === '/api/mt5-readonly-secondary' ||
+      requestUrl.split('?')[0].startsWith('/api/mt5-readonly-secondary/'))
+  ) {
+    const pathPart = requestUrl.split('?')[0];
+    const endpoint = pathPart === '/api/mt5-readonly-secondary' ? 'snapshot' : path.basename(pathPart);
+    handleMt5Readonly(req, res, endpoint, { scope: 'secondary' });
     return;
   }
   if (req.method === 'GET' && (requestUrl.split('?')[0] === '/api/mt5-symbol-registry' || requestUrl.split('?')[0].startsWith('/api/mt5-symbol-registry/'))) {

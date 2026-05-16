@@ -110,6 +110,12 @@ def runtime_dir_candidates() -> list[Path]:
         os.environ.get("QG_MT5_FILES_DIR", ""),
         os.environ.get("QG_HFM_FILES_DIR", ""),
     ]
+    explicit_only = str(os.environ.get("QG_MT5_EA_SNAPSHOT_EXPLICIT_ONLY", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     candidates: list[Path] = []
     for raw in raw_values:
         value = str(raw or "").strip()
@@ -118,6 +124,16 @@ def runtime_dir_candidates() -> list[Path]:
         if os.name != "nt" and is_windows_absolute_path(value):
             continue
         candidates.append(Path(value).expanduser())
+    if explicit_only:
+        seen: set[str] = set()
+        unique: list[Path] = []
+        for candidate in candidates:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+        return unique
     candidates.extend(
         [
             mac_mt5_files_dir(),
