@@ -373,6 +373,36 @@ def _is_p4_10d_rsi_focus_row(row: Dict[str, Any]) -> bool:
     return _num(row.get("fitness"), -99.0) > -8.0 or max(sample_count, trade_count) >= 12
 
 
+def _is_p4_10f_rsi_segment_overfit_row(row: Dict[str, Any]) -> bool:
+    if _row_family(row) != "RSI_Reversal":
+        return False
+    seed = row.get("strategyJson") if isinstance(row.get("strategyJson"), dict) else {}
+    if str(seed.get("direction") or row.get("direction") or "").upper() != "LONG":
+        return False
+    blocker = str(row.get("blockerCode") or "")
+    if blocker not in {"WALK_FORWARD_UNSTABLE", "OVERFIT_RISK", "OVERFIT_RISK_HIGH"}:
+        return False
+    breakdown = row.get("fitnessBreakdown") if isinstance(row.get("fitnessBreakdown"), dict) else {}
+    backtest = breakdown.get("strategyBacktest") if isinstance(breakdown.get("strategyBacktest"), dict) else {}
+    walk_forward = breakdown.get("walkForward") if isinstance(breakdown.get("walkForward"), dict) else {}
+    summary = walk_forward.get("summary") if isinstance(walk_forward.get("summary"), dict) else {}
+    sample_count = int(_num(breakdown.get("sampleCount"), 0))
+    trade_count = int(_num(backtest.get("tradeCount"), 0))
+    effective_count = max(sample_count, trade_count)
+    net_r = _num(backtest.get("netR"), _num(breakdown.get("netR"), 0.0))
+    if net_r <= 0 or effective_count < 18 or effective_count > 60:
+        return False
+    validation_net = _num(summary.get("validationNetR"), 0.0)
+    forward_net = _num(summary.get("forwardNetR"), 0.0)
+    train_net = _num(summary.get("trainNetR"), 0.0)
+    return (
+        validation_net < 0
+        or forward_net < 0
+        or _num(summary.get("overfitPenalty"), 0.0) >= 0.25
+        or (train_net > 0 and min(validation_net, forward_net) < train_net * 0.45)
+    )
+
+
 def _rsi_focus_sort_key(row: Dict[str, Any]) -> tuple:
     breakdown = row.get("fitnessBreakdown") if isinstance(row.get("fitnessBreakdown"), dict) else {}
     backtest = breakdown.get("strategyBacktest") if isinstance(breakdown.get("strategyBacktest"), dict) else {}
@@ -381,8 +411,11 @@ def _rsi_focus_sort_key(row: Dict[str, Any]) -> tuple:
     sample_count = int(_num(breakdown.get("sampleCount"), 0))
     trade_count = int(_num(backtest.get("tradeCount"), 0))
     blocker = str(row.get("blockerCode") or "")
+    segment_priority = 2 if _is_p4_10f_rsi_segment_overfit_row(row) else (
+        1 if blocker in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH", "RSI_MIN_TRADE_GATE"} else 0
+    )
     return (
-        1 if blocker in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH", "RSI_MIN_TRADE_GATE"} else 0,
+        segment_priority,
         min(40, max(sample_count, trade_count)),
         _num(summary.get("stabilityScore"), 0.0),
         _num(row.get("fitness"), -99.0),
@@ -458,7 +491,17 @@ def _repair_profiles_for_row(row: Dict[str, Any]) -> List[str]:
                 "BB_SHORT_RECLAIM_WIDE_BAND",
             ]
     elif family == "RSI_Reversal" and blocker in QUALITY_REPAIR_BLOCKERS:
-        if blocker in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH", "RSI_MIN_TRADE_GATE"}:
+        if _is_p4_10f_rsi_segment_overfit_row(row):
+            family_profiles = [
+                "RSI_REVERSAL_SEGMENT_OVERFIT_CLOSURE",
+                "RSI_REVERSAL_FORWARD_DRAWDOWN_CLIPPER",
+                "RSI_REVERSAL_VALIDATION_FORWARD_BALANCER",
+                "RSI_REVERSAL_20_TRADE_GATE_BALANCER",
+                "RSI_REVERSAL_WALK_FORWARD_BALANCER",
+            ]
+            rotation = int(_num(row.get("rank"), 1) - 1) % 3
+            family_profiles = family_profiles[rotation:3] + family_profiles[:rotation] + family_profiles[3:]
+        elif blocker in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH", "RSI_MIN_TRADE_GATE"}:
             family_profiles = [
                 "RSI_REVERSAL_REGIME_EVENT_FILTER",
                 "RSI_REVERSAL_20_TRADE_GATE_BALANCER",
@@ -701,7 +744,46 @@ def _apply_rsi_reversal_profile(seed: Dict[str, Any], profile: str, offset: int)
     exit_cfg = seed.setdefault("exit", {})
     risk = seed.setdefault("risk", {})
     direction = str(seed.get("direction") or "LONG").upper()
-    if profile == "RSI_REVERSAL_REGIME_EVENT_FILTER":
+    if profile == "RSI_REVERSAL_SEGMENT_OVERFIT_CLOSURE":
+        _apply_p4_10f_rsi_segment_filter(seed, offset, "closure")
+        rsi["timeframe"] = "H1"
+        rsi["period"] = [21, 21, 22][offset % 3]
+        rsi["buyBand"] = [29, 29, 30][offset % 3]
+        rsi["crossbackThreshold"] = [0.6, 0.7, 0.8][offset % 3]
+        rsi["maxCrossbackRsi"] = [36.5, 37.5, 38.0][offset % 3]
+        _set_exit(seed, hold_h1=[3, 4, 4][offset % 3], hold_m15=[4, 5, 6][offset % 3])
+        exit_cfg["trailStartR"] = [0.65, 0.75, 0.85][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.35, 0.38, 0.42][offset % 3]
+        exit_cfg["breakevenDelayR"] = [0.25, 0.35, 0.45][offset % 3]
+        risk["riskPips"] = max([18.0, 20.0, 22.0][offset % 3], _num(risk.get("riskPips"), 10.0))
+        risk["opportunityLotMultiplier"] = min(0.26, _num(risk.get("opportunityLotMultiplier"), 0.35))
+    elif profile == "RSI_REVERSAL_FORWARD_DRAWDOWN_CLIPPER":
+        _apply_p4_10f_rsi_segment_filter(seed, offset, "forward")
+        rsi["timeframe"] = "H1"
+        rsi["period"] = [21, 21, 22][offset % 3]
+        rsi["buyBand"] = [29, 29, 30][offset % 3]
+        rsi["crossbackThreshold"] = [0.65, 0.75, 0.85][offset % 3]
+        rsi["maxCrossbackRsi"] = [34.5, 35.0, 35.5][offset % 3]
+        _set_exit(seed, hold_h1=[2, 3, 3][offset % 3], hold_m15=[3, 4, 5][offset % 3])
+        exit_cfg["trailStartR"] = [0.55, 0.65, 0.75][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.30, 0.35, 0.40][offset % 3]
+        exit_cfg["breakevenDelayR"] = [0.20, 0.30, 0.40][offset % 3]
+        risk["riskPips"] = max([20.0, 22.0, 24.0][offset % 3], _num(risk.get("riskPips"), 10.0))
+        risk["opportunityLotMultiplier"] = min(0.24, _num(risk.get("opportunityLotMultiplier"), 0.35))
+    elif profile == "RSI_REVERSAL_VALIDATION_FORWARD_BALANCER":
+        _apply_p4_10f_rsi_segment_filter(seed, offset, "balanced")
+        rsi["timeframe"] = "H1"
+        rsi["period"] = [20, 21, 22][offset % 3]
+        rsi["buyBand"] = [29, 29, 30][offset % 3]
+        rsi["crossbackThreshold"] = [0.55, 0.65, 0.75][offset % 3]
+        rsi["maxCrossbackRsi"] = [36.0, 36.5, 37.0][offset % 3]
+        _set_exit(seed, hold_h1=[4, 4, 5][offset % 3], hold_m15=[5, 6, 7][offset % 3])
+        exit_cfg["trailStartR"] = [0.75, 0.85, 0.95][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.38, 0.42, 0.46][offset % 3]
+        exit_cfg["breakevenDelayR"] = [0.35, 0.45, 0.55][offset % 3]
+        risk["riskPips"] = max([18.0, 20.0, 22.0][offset % 3], _num(risk.get("riskPips"), 10.0))
+        risk["opportunityLotMultiplier"] = min(0.28, _num(risk.get("opportunityLotMultiplier"), 0.35))
+    elif profile == "RSI_REVERSAL_REGIME_EVENT_FILTER":
         _apply_p4_10e_rsi_filters(seed, offset, strict=True)
         rsi["timeframe"] = "H1"
         rsi["period"] = [24, 26, 28][offset % 3]
@@ -822,6 +904,37 @@ def _apply_p4_10e_rsi_filters(seed: Dict[str, Any], offset: int, strict: bool) -
     for condition in ("rsi.regimeFilter == P4_10E_RSI_BEARISH_STRETCH", "eventRisk not in ['HARD','SOFT']"):
         if condition not in conditions:
             conditions.append(condition)
+    entry["conditions"] = conditions
+
+
+def _apply_p4_10f_rsi_segment_filter(seed: Dict[str, Any], offset: int, variant: str) -> None:
+    _apply_p4_10e_rsi_filters(seed, offset, strict=True)
+    rsi = seed.setdefault("indicators", {}).setdefault("rsi", {})
+    regime = rsi.setdefault("regimeFilter", {})
+    regime["mode"] = "P4_10E_RSI_BEARISH_STRETCH"
+    regime["allowedHoursUtc"] = [0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+    if variant == "forward":
+        regime["maxFastMinusSlowPips"] = -14
+        regime["maxDistanceFromSlowPips"] = -60
+        regime["maxSlowSlopePips"] = -7
+        regime["minDistanceFromSlowPips"] = -260
+    elif variant == "balanced":
+        regime["maxFastMinusSlowPips"] = -10
+        regime["maxDistanceFromSlowPips"] = -52
+        regime["maxSlowSlopePips"] = -5
+        regime["minDistanceFromSlowPips"] = -280
+    else:
+        regime["minFastMinusSlowPips"] = -260
+        regime["maxFastMinusSlowPips"] = -6
+        regime["maxDistanceFromSlowPips"] = -45
+        regime["minSlowSlopePips"] = -50
+        regime["maxSlowSlopePips"] = -4
+        regime["minDistanceFromSlowPips"] = -280
+    entry = seed.setdefault("entry", {})
+    conditions = entry.get("conditions") if isinstance(entry.get("conditions"), list) else []
+    condition = "rsi.segmentOverfitClosure == true"
+    if condition not in conditions:
+        conditions.append(condition)
     entry["conditions"] = conditions
 
 
@@ -1035,6 +1148,12 @@ def _enforce_shadow_safety(seed: Dict[str, Any]) -> None:
 
 
 def _repair_reason_zh(blocker: str, profile: str) -> str:
+    if profile.startswith("RSI_REVERSAL_SEGMENT_OVERFIT"):
+        return "P4-10F 针对 RSI train / validation / forward 分段过拟合，收紧反弹追价并提前保护盈利。"
+    if profile.startswith("RSI_REVERSAL_FORWARD_DRAWDOWN"):
+        return "P4-10F 针对 RSI forward 段回撤，降低持仓尾部风险并剪裁过强 crossback 反弹。"
+    if profile.startswith("RSI_REVERSAL_VALIDATION_FORWARD"):
+        return "P4-10F 针对 RSI validation / forward 平衡，保持 20-40 样本同时降低 train 段优势依赖。"
     if profile.startswith("RSI_REVERSAL_REGIME_EVENT_FILTER"):
         return "P4-10E 针对 RSI 小样本正收益，只允许在 H1 bearish-stretch 与已知事件风险外扩样。"
     if profile.startswith("RSI_REVERSAL_20_TRADE_GATE"):

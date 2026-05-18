@@ -194,9 +194,10 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
     walk_forward_summary = walk_forward.get("summary") if isinstance(walk_forward.get("summary"), dict) else {}
     walk_forward_penalty = _walk_forward_penalty(walk_forward_summary)
     walk_forward_stability_bonus = _walk_forward_stability_bonus(walk_forward_summary)
+    delta_overfit_penalty = _delta_overfit_penalty(family, direction, sample_count, walk_forward_summary, metrics)
     overfit_penalty = max(
         _num(walk_forward_summary.get("overfitPenalty"), 0),
-        0.25 if metrics["validationNetRDelta"] < 0 or metrics["forwardNetRDelta"] < 0 else 0.0,
+        delta_overfit_penalty,
     )
     backtest_no_trade_penalty = 2.0 if backtest.get("present") and backtest.get("ok") and backtest_trade_count == 0 else 0.0
     trade_frequency_penalty = 0.15 if sample_count == 0 else 0.0
@@ -207,6 +208,14 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         sample_count,
         backtest_trade_count,
         metrics["netR"],
+    )
+    rsi_segment_overfit_penalty = _rsi_segment_overfit_penalty(
+        family,
+        direction,
+        sample_count,
+        backtest_trade_count,
+        metrics["netR"],
+        walk_forward_summary,
     )
     evidence_penalty = float(metrics.get("evidencePenalty", 0.0))
     strategy_contract_shadow_bonus = _strategy_contract_shadow_bonus(metrics.get("strategyContractShadow", {}))
@@ -230,6 +239,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         - overfit_penalty
         - rsi_overfit_sample_penalty
         - rsi_min_trade_gate_penalty
+        - rsi_segment_overfit_penalty
         - backtest_no_trade_penalty
         - walk_forward_penalty
         - low_sample_penalty
@@ -252,7 +262,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         blocker = "RSI_MIN_TRADE_GATE"
     elif walk_forward_summary.get("promotionGateStatus") == "BLOCKED":
         blocker = walk_forward_summary.get("blockerCode") or "WALK_FORWARD_FAILED"
-    elif overfit_penalty:
+    elif _overfit_blocks_ranking(family, direction, sample_count, walk_forward_summary, overfit_penalty):
         blocker = "OVERFIT_RISK"
     elif metrics.get("parity", {}).get("promotionGateStatus") in {"BLOCKED", "MISSING"}:
         blocker = "PARITY_PROMOTION_GATE_BLOCKED"
@@ -268,6 +278,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         **metrics,
         "fitness": round(fitness, 4),
         "overfitPenalty": round(overfit_penalty, 4),
+        "deltaOverfitPenalty": round(delta_overfit_penalty, 4),
         "backtestNoTradePenalty": round(backtest_no_trade_penalty, 4),
         "walkForwardPenalty": round(walk_forward_penalty, 4),
         "walkForwardStabilityBonus": round(walk_forward_stability_bonus, 4),
@@ -277,6 +288,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         "tradeFrequencyPenalty": round(trade_frequency_penalty, 4),
         "rsiOverfitSamplePenalty": round(rsi_overfit_sample_penalty, 4),
         "rsiMinTradeGatePenalty": round(rsi_min_trade_gate_penalty, 4),
+        "rsiSegmentOverfitPenalty": round(rsi_segment_overfit_penalty, 4),
         "evidencePenalty": round(evidence_penalty, 4),
         "profitFactorBonus": round(profit_factor_bonus, 4),
         "winRateBonus": round(win_rate_bonus, 4),
@@ -327,6 +339,89 @@ def _rsi_min_trade_gate_penalty(
     effective_count = max(0, max(sample_count, trade_count))
     sample_gap = max(0, 20 - effective_count)
     return round(min(7.0, 1.0 + sample_gap * 0.32 + max(0.0, net_r) * 0.25), 4)
+
+
+def _rsi_segment_overfit_penalty(
+    family: Any,
+    direction: Any,
+    sample_count: int,
+    trade_count: int,
+    net_r: float,
+    walk_forward_summary: Dict[str, Any],
+) -> float:
+    if family != "RSI_Reversal" or str(direction or "").upper() != "LONG":
+        return 0.0
+    effective_count = max(sample_count, trade_count)
+    if net_r <= 0 or effective_count < 18:
+        return 0.0
+    train_net = _num(walk_forward_summary.get("trainNetR"), 0.0)
+    validation_net = _num(walk_forward_summary.get("validationNetR"), 0.0)
+    forward_net = _num(walk_forward_summary.get("forwardNetR"), 0.0)
+    penalty = 0.0
+    if train_net > 0 and validation_net < train_net * 0.45:
+        penalty += min(0.45, (train_net - max(validation_net, 0.0)) * 0.07)
+    if train_net > 0 and forward_net < train_net * 0.35:
+        penalty += min(0.55, (train_net - max(forward_net, 0.0)) * 0.08)
+    if validation_net < 0:
+        penalty += 0.25
+    if forward_net < 0:
+        penalty += 0.35
+    if _num(walk_forward_summary.get("overfitPenalty"), 0.0) >= 0.65:
+        penalty += 0.25
+    return round(min(1.4, penalty), 4)
+
+
+def _delta_overfit_penalty(
+    family: Any,
+    direction: Any,
+    sample_count: int,
+    walk_forward_summary: Dict[str, Any],
+    metrics: Dict[str, Any],
+) -> float:
+    validation_delta = _num(metrics.get("validationNetRDelta"), 0.0)
+    forward_delta = _num(metrics.get("forwardNetRDelta"), 0.0)
+    if validation_delta >= 0 and forward_delta >= 0:
+        return 0.0
+    validation_net = _num(walk_forward_summary.get("validationNetR"), 0.0)
+    forward_net = _num(walk_forward_summary.get("forwardNetR"), 0.0)
+    stability = _num(walk_forward_summary.get("stabilityScore"), 0.0)
+    wf_overfit = _num(walk_forward_summary.get("overfitPenalty"), 0.0)
+    if (
+        family == "RSI_Reversal"
+        and str(direction or "").upper() == "LONG"
+        and sample_count >= 20
+        and validation_net > 0
+        and forward_net > 0
+        and stability >= 0.82
+        and wf_overfit < 0.20
+    ):
+        return 0.0
+    return 0.25
+
+
+def _overfit_blocks_ranking(
+    family: Any,
+    direction: Any,
+    sample_count: int,
+    walk_forward_summary: Dict[str, Any],
+    overfit_penalty: float,
+) -> bool:
+    if overfit_penalty <= 0:
+        return False
+    validation_net = _num(walk_forward_summary.get("validationNetR"), 0.0)
+    forward_net = _num(walk_forward_summary.get("forwardNetR"), 0.0)
+    stability = _num(walk_forward_summary.get("stabilityScore"), 0.0)
+    if (
+        family == "RSI_Reversal"
+        and str(direction or "").upper() == "LONG"
+        and sample_count >= 20
+        and validation_net > 0
+        and forward_net > 0
+        and stability >= 0.82
+        and overfit_penalty < 0.20
+    ):
+        return False
+    return True
 
 
 def _execution_penalty(metrics: Dict[str, Any]) -> float:

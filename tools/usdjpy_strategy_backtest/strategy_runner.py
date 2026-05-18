@@ -159,6 +159,7 @@ def _rsi_signals(strategy: Dict[str, Any], bars: List[Bar]) -> List[Dict[str, An
     buy_band = float(rsi_cfg.get("buyBand", 34))
     sell_band = float(rsi_cfg.get("sellBand", max(55.0, 100.0 - buy_band)))
     crossback_threshold = float(rsi_cfg.get("crossbackThreshold", 0.8))
+    max_crossback_rsi = _float_param(rsi_cfg, "maxCrossbackRsi", 100.0, 20.0, 100.0)
 
     closes = [item.close for item in bars]
     rsi_series = rsi_values(closes, period)
@@ -178,6 +179,9 @@ def _rsi_signals(strategy: Dict[str, Any], bars: List[Bar]) -> List[Dict[str, An
         long_cross = previous_rsi <= buy_band and current_rsi >= buy_band + crossback_threshold
         short_cross = previous_rsi >= sell_band and current_rsi <= sell_band - crossback_threshold
         direction = str(strategy.get("direction") or "LONG").upper()
+        if direction == "LONG" and long_cross and current_rsi > max_crossback_rsi:
+            index += 1
+            continue
         if (direction == "LONG" and long_cross) or (direction == "SHORT" and short_cross):
             regime = _rsi_regime_decision(bars, index, direction, regime_cfg, fast_ema, slow_ema)
             if not regime.get("allowed", True):
@@ -749,6 +753,7 @@ def _parity_vector(strategy: Dict[str, Any], bars: List[Bar], signals: List[Dict
             "buyBand": rsi_cfg.get("buyBand"),
             "sellBand": rsi_cfg.get("sellBand"),
             "crossbackThreshold": rsi_cfg.get("crossbackThreshold"),
+            "maxCrossbackRsi": rsi_cfg.get("maxCrossbackRsi"),
             "regimeFilter": rsi_cfg.get("regimeFilter") if isinstance(rsi_cfg.get("regimeFilter"), dict) else {},
         },
         "familyParameters": {

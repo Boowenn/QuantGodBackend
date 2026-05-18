@@ -128,6 +128,7 @@ def validate_strategy_json(seed: Dict[str, Any]) -> Dict[str, Any]:
         _check_range("RSI period", rsi.get("period"), 2, 50),
         _check_range("RSI buyBand", rsi.get("buyBand"), 5, 45),
         _check_range("RSI crossbackThreshold", rsi.get("crossbackThreshold"), 0, 3),
+        _check_range("RSI maxCrossbackRsi", rsi.get("maxCrossbackRsi", 100), 20, 100),
         _check_rsi_regime_filter(rsi.get("regimeFilter") if isinstance(rsi.get("regimeFilter"), dict) else {}),
         _check_entry_event_filter(entry.get("eventFilter") if isinstance(entry.get("eventFilter"), dict) else {}),
         _check_timeframe("MA", ma.get("timeframe")),

@@ -172,6 +172,7 @@ test('USDJPY Strategy JSON backtest covers all USDJPY shadow strategy families',
     'nightReversion',
     'h4Pullback',
     'regimeFilter',
+    'maxCrossbackRsi',
     'entryEventFilter',
     'eventFilteredSignals',
   ]) {

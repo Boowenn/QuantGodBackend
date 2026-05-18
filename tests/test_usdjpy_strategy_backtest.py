@@ -621,6 +621,65 @@ class USDJPYStrategyBacktestTests(unittest.TestCase):
             self.assertGreaterEqual(repair["exit"]["timeStopBars"]["H1"], 3)
             self.assertTrue(validate_strategy_json(repair)["valid"])
 
+    def test_ga_quality_repair_adds_rsi_segment_overfit_closure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            ga_dir = runtime_dir / "ga"
+            ga_dir.mkdir(parents=True)
+            parent = base_strategy_seed("PARENT-RSI-SEGMENT", family="RSI_Reversal", direction="LONG")
+            parent["indicators"]["rsi"]["timeframe"] = "H1"
+            parent["indicators"]["rsi"]["period"] = 21
+            parent["indicators"]["rsi"]["buyBand"] = 29
+            parent["indicators"]["rsi"]["crossbackThreshold"] = 0.7
+            parent["indicators"]["rsi"]["regimeFilter"] = {
+                "mode": "P4_10E_RSI_BEARISH_STRETCH",
+                "allowedHoursUtc": [0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+                "emaFastPeriod": 20,
+                "emaSlowPeriod": 50,
+                "slopeLookbackBars": 3,
+                "minFastMinusSlowPips": -260,
+                "maxFastMinusSlowPips": -6,
+                "minDistanceFromSlowPips": -280,
+                "maxDistanceFromSlowPips": -45,
+                "minSlowSlopePips": -50,
+                "maxSlowSlopePips": -4,
+            }
+            row = {
+                "generation": 60,
+                "rank": 1,
+                "fitness": 1.45,
+                "blockerCode": "WALK_FORWARD_UNSTABLE",
+                "strategyJson": parent,
+                "fitnessBreakdown": {
+                    "sampleCount": 22,
+                    "strategyBacktest": {"netR": 4.89, "tradeCount": 19},
+                    "walkForward": {
+                        "summary": {
+                            "promotionGateStatus": "BLOCKED",
+                            "blockerCode": "WALK_FORWARD_UNSTABLE",
+                            "trainNetR": 5.52,
+                            "validationNetR": 1.45,
+                            "forwardNetR": -0.05,
+                            "overfitPenalty": 0.72,
+                            "stabilityScore": 0.54,
+                            "sampleCount": 22,
+                        }
+                    },
+                },
+            }
+            (ga_dir / "QuantGod_GACandidateRuns.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            repair = quality_repair_seed_pool(runtime_dir, generation_number=61, limit=4)[0]
+            rsi = repair["indicators"]["rsi"]
+
+            self.assertEqual(repair["qualityProfile"], "RSI_REVERSAL_SEGMENT_OVERFIT_CLOSURE")
+            self.assertEqual(repair["repairTargetBlocker"], "WALK_FORWARD_UNSTABLE")
+            self.assertLessEqual(rsi["maxCrossbackRsi"], 38.0)
+            self.assertEqual(rsi["regimeFilter"]["mode"], "P4_10E_RSI_BEARISH_STRETCH")
+            self.assertLessEqual(repair["exit"]["trailStartR"], 0.85)
+            self.assertIn("rsi.segmentOverfitClosure == true", repair["entry"]["conditions"])
+            self.assertTrue(validate_strategy_json(repair)["valid"])
+
     def test_p4_10e_rsi_regime_filter_allows_only_bearish_stretch_hours(self):
         start = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
         bars = []
@@ -708,6 +767,51 @@ class USDJPYStrategyBacktestTests(unittest.TestCase):
         self.assertEqual(score["blockerCode"], "RSI_MIN_TRADE_GATE")
         self.assertGreater(score["rsiMinTradeGatePenalty"], 0)
         self.assertLess(score["fitness"], 0)
+
+    def test_p4_10f_rsi_segment_overfit_penalty_flags_train_dominance(self):
+        seed = base_strategy_seed("RSI-SEGMENT-OVERFIT", family="RSI_Reversal", direction="LONG")
+        metrics = {
+            "sampleCount": 30,
+            "netR": 4.7,
+            "maxAdverseR": 0.0,
+            "profitCaptureRatio": 0.0,
+            "missedOpportunityReduction": 0.0,
+            "validationNetRDelta": -3.7,
+            "forwardNetRDelta": -0.4,
+            "walkForward": {
+                "summary": {
+                    "promotionGateStatus": "PASS",
+                    "stabilityScore": 0.91,
+                    "validSegmentCount": 3,
+                    "trainNetR": 5.1,
+                    "validationNetR": 1.3,
+                    "forwardNetR": 0.9,
+                    "sampleCount": 30,
+                    "overfitPenalty": 0.08,
+                }
+            },
+            "strategyBacktest": {
+                "present": True,
+                "ok": True,
+                "tradeCount": 21,
+                "profitFactor": 2.5,
+                "winRate": 65.0,
+                "maxDrawdownR": 0.4,
+                "sharpe": 1.0,
+                "sortino": 1.0,
+            },
+            "parity": {"promotionGateStatus": "PASS"},
+            "executionFeedback": {"promotionGateStatus": "PASS"},
+            "strategyContractShadow": {},
+            "evidencePenalty": 0.0,
+            "historyProductionStatus": {"promotionGateStatus": "PASS"},
+        }
+        with patch("tools.strategy_ga.fitness.evidence_metrics", return_value=metrics):
+            score = score_seed(seed, Path("/tmp"))
+
+        self.assertGreater(score["rsiSegmentOverfitPenalty"], 0)
+        self.assertLess(score["overfitPenalty"], 0.2)
+        self.assertIsNone(score["blockerCode"])
 
     def test_history_sync_pulls_incremental_usdjpy_bars_from_mt5(self):
         class FakeMT5(types.SimpleNamespace):
