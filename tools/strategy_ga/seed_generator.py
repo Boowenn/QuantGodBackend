@@ -26,6 +26,8 @@ QUALITY_REPAIR_BLOCKERS = {
     "WALK_FORWARD_INSUFFICIENT",
     "MAX_ADVERSE_TOO_HIGH",
     "INSUFFICIENT_SAMPLES",
+    "STRATEGY_BACKTEST_NO_TRADES",
+    "OVERFIT_RISK",
     "OVERFIT_RISK_HIGH",
     "FITNESS_NOT_POSITIVE",
 }
@@ -244,10 +246,10 @@ def quality_repair_seed_pool(runtime_dir: Path, generation_number: int, limit: i
     rows = rows[: max(1, min(len(rows), max(2, (limit + 1) // 2)))]
     seeds: List[Dict[str, Any]] = []
     offset = 1
-    max_profile_count = max((len(_repair_profiles_for_blocker(str(row.get("blockerCode") or ""))) for row in rows), default=0)
+    max_profile_count = max((len(_repair_profiles_for_row(row)) for row in rows), default=0)
     for profile_index in range(max_profile_count):
         for row in rows:
-            profiles = _repair_profiles_for_blocker(str(row.get("blockerCode") or ""))
+            profiles = _repair_profiles_for_row(row)
             if profile_index >= len(profiles):
                 continue
             seed = _build_quality_repair_seed(row, generation_number, offset, profiles[profile_index])
@@ -298,8 +300,10 @@ def _balanced_quality_repair_rows(rows: List[Dict[str, Any]], limit: int) -> Lis
     seen: set[str] = set()
     blocker_priority = [
         "WALK_FORWARD_UNSTABLE",
+        "OVERFIT_RISK",
         "MAX_ADVERSE_TOO_HIGH",
         "INSUFFICIENT_SAMPLES",
+        "STRATEGY_BACKTEST_NO_TRADES",
         "WALK_FORWARD_INSUFFICIENT",
         "OVERFIT_RISK_HIGH",
         "FITNESS_NOT_POSITIVE",
@@ -363,6 +367,46 @@ def _build_quality_repair_seed(
     return seed
 
 
+def _repair_profiles_for_row(row: Dict[str, Any]) -> List[str]:
+    seed = row.get("strategyJson") if isinstance(row.get("strategyJson"), dict) else {}
+    family = str(seed.get("strategyFamily") or "")
+    direction = str(seed.get("direction") or "").upper()
+    blocker = str(row.get("blockerCode") or "")
+    base_profiles = _repair_profiles_for_blocker(blocker)
+    family_profiles: List[str] = []
+    if family == "BB_Triple" and direction == "SHORT":
+        if blocker in {"INSUFFICIENT_SAMPLES", "STRATEGY_BACKTEST_NO_TRADES", "WALK_FORWARD_INSUFFICIENT", "OVERFIT_RISK"}:
+            family_profiles = [
+                "BB_SHORT_SAMPLE_EXPANDER",
+                "BB_SHORT_SAMPLE_EXPANDER_M15",
+                "BB_SHORT_RECLAIM_FAST_EXIT",
+            ]
+        elif blocker in {"WALK_FORWARD_UNSTABLE", "MAX_ADVERSE_TOO_HIGH"}:
+            family_profiles = [
+                "BB_SHORT_RECLAIM_STABILIZER",
+                "BB_SHORT_RECLAIM_FAST_EXIT",
+                "BB_SHORT_RECLAIM_WIDE_BAND",
+            ]
+    elif family == "USDJPY_TOKYO_RANGE_BREAKOUT" and blocker in {
+        "WALK_FORWARD_UNSTABLE",
+        "INSUFFICIENT_SAMPLES",
+        "STRATEGY_BACKTEST_NO_TRADES",
+    }:
+        if blocker in {"INSUFFICIENT_SAMPLES", "STRATEGY_BACKTEST_NO_TRADES"}:
+            family_profiles = [
+                "TOKYO_RANGE_SAMPLE_EXPANDER",
+                "TOKYO_RANGE_SESSION_STABILIZER",
+                "TOKYO_RANGE_FAST_EXIT",
+            ]
+        else:
+            family_profiles = [
+                "TOKYO_RANGE_SESSION_STABILIZER",
+                "TOKYO_RANGE_BUFFERED_BREAKOUT",
+                "TOKYO_RANGE_FAST_EXIT",
+            ]
+    return family_profiles + [profile for profile in base_profiles if profile not in set(family_profiles)]
+
+
 def _repair_profiles_for_blocker(blocker: str) -> List[str]:
     if blocker == "MAX_ADVERSE_TOO_HIGH":
         return [
@@ -370,13 +414,13 @@ def _repair_profiles_for_blocker(blocker: str) -> List[str]:
             "MAX_ADVERSE_REPAIR_TIGHT_ENTRY",
             "MAX_ADVERSE_REPAIR_WIDER_STOP",
         ]
-    if blocker in {"INSUFFICIENT_SAMPLES", "WALK_FORWARD_INSUFFICIENT"}:
+    if blocker in {"INSUFFICIENT_SAMPLES", "STRATEGY_BACKTEST_NO_TRADES", "WALK_FORWARD_INSUFFICIENT"}:
         return [
             "LOW_SAMPLE_EXPANDER",
             "LOW_SAMPLE_EXPANDER_M15",
             "LOW_SAMPLE_EXPANDER_FAST",
         ]
-    if blocker in {"WALK_FORWARD_UNSTABLE", "OVERFIT_RISK_HIGH"}:
+    if blocker in {"WALK_FORWARD_UNSTABLE", "OVERFIT_RISK", "OVERFIT_RISK_HIGH"}:
         return [
             "WALK_FORWARD_STABILIZER",
             "WALK_FORWARD_STABILIZER_FAST_EXIT",
@@ -388,6 +432,8 @@ def _repair_profiles_for_blocker(blocker: str) -> List[str]:
 def _apply_quality_profile(seed: Dict[str, Any], blocker: str, profile: str, offset: int) -> None:
     exit_cfg = seed.setdefault("exit", {})
     risk = seed.setdefault("risk", {})
+    if _apply_family_quality_profile(seed, profile, offset):
+        return
     if profile.startswith("LOW_SAMPLE"):
         _set_exit(seed, hold_h1=[4, 6, 8][offset % 3], hold_m15=[6, 8, 10][offset % 3])
         exit_cfg["breakevenDelayR"] = [0.8, 1.0, 1.2][offset % 3]
@@ -414,6 +460,125 @@ def _apply_quality_profile(seed: Dict[str, Any], blocker: str, profile: str, off
     risk["riskPips"] = max(_num(risk.get("riskPips"), 10.0), [15.0, 20.0, 25.0][offset % 3])
     risk["opportunityLotMultiplier"] = min(0.35, _num(risk.get("opportunityLotMultiplier"), 0.35))
     _tighten_family_entry(seed, offset, strong=profile.endswith("TIGHT_ENTRY") or blocker == "OVERFIT_RISK_HIGH")
+
+
+def _apply_family_quality_profile(seed: Dict[str, Any], profile: str, offset: int) -> bool:
+    if profile.startswith("BB_SHORT"):
+        _apply_bb_short_reclaim_profile(seed, profile, offset)
+        return True
+    if profile.startswith("TOKYO_RANGE"):
+        _apply_tokyo_range_profile(seed, profile, offset)
+        return True
+    return False
+
+
+def _apply_bb_short_reclaim_profile(seed: Dict[str, Any], profile: str, offset: int) -> None:
+    indicators = seed.setdefault("indicators", {})
+    bollinger = indicators.setdefault("bollinger", {})
+    exit_cfg = seed.setdefault("exit", {})
+    risk = seed.setdefault("risk", {})
+    bollinger["timeframe"] = "H1" if profile.endswith("WIDE_BAND") else "M15"
+    if profile.startswith("BB_SHORT_SAMPLE"):
+        bollinger["timeframe"] = "M15"
+        bollinger["period"] = max(14, min(28, int(_num(bollinger.get("period"), 20) - 2 + (offset % 2) * 2)))
+        bollinger["deviations"] = round(max(1.7, min(2.35, _num(bollinger.get("deviations"), 2.0) - 0.15)), 2)
+        bollinger["reclaimBufferPips"] = round(max(0.4, min(3.0, _num(bollinger.get("reclaimBufferPips"), 0.0) + 0.4)), 2)
+        _set_exit(seed, hold_h1=3, hold_m15=5)
+        exit_cfg["trailStartR"] = 1.0
+        exit_cfg["mfeGivebackPct"] = 0.5
+        exit_cfg["breakevenDelayR"] = 0.65
+        risk["riskPips"] = max(16.0, _num(risk.get("riskPips"), 10.0))
+        seed["direction"] = "SHORT"
+        risk["opportunityLotMultiplier"] = min(0.32, _num(risk.get("opportunityLotMultiplier"), 0.35))
+        return
+    elif profile.endswith("FAST_EXIT"):
+        bollinger["period"] = max(18, min(36, int(_num(bollinger.get("period"), 20) + 2)))
+        bollinger["deviations"] = round(max(2.0, min(3.2, _num(bollinger.get("deviations"), 2.0) + 0.25)), 2)
+        bollinger["reclaimBufferPips"] = round(max(1.5, min(8.0, _num(bollinger.get("reclaimBufferPips"), 0.0) + 1.5)), 2)
+        _set_exit(seed, hold_h1=2, hold_m15=3)
+        exit_cfg["trailStartR"] = 0.75
+        exit_cfg["mfeGivebackPct"] = 0.42
+        exit_cfg["breakevenDelayR"] = 0.4
+        risk["riskPips"] = max(18.0, _num(risk.get("riskPips"), 10.0))
+    elif profile.endswith("WIDE_BAND"):
+        bollinger["period"] = max(24, min(44, int(_num(bollinger.get("period"), 20) + 6 + (offset % 2) * 4)))
+        bollinger["deviations"] = round(max(2.35, min(3.6, _num(bollinger.get("deviations"), 2.0) + 0.45)), 2)
+        bollinger["reclaimBufferPips"] = round(max(2.0, min(10.0, _num(bollinger.get("reclaimBufferPips"), 0.0) + 2.0)), 2)
+        _set_exit(seed, hold_h1=3, hold_m15=4)
+        exit_cfg["trailStartR"] = 0.95
+        exit_cfg["mfeGivebackPct"] = 0.48
+        exit_cfg["breakevenDelayR"] = 0.55
+        risk["riskPips"] = max(22.5, _num(risk.get("riskPips"), 10.0))
+    else:
+        bollinger["period"] = max(20, min(40, int(_num(bollinger.get("period"), 20) + 4)))
+        bollinger["deviations"] = round(max(2.15, min(3.4, _num(bollinger.get("deviations"), 2.0) + 0.3)), 2)
+        bollinger["reclaimBufferPips"] = round(max(1.0, min(8.0, _num(bollinger.get("reclaimBufferPips"), 0.0) + 1.0)), 2)
+        _set_exit(seed, hold_h1=3, hold_m15=4)
+        exit_cfg["trailStartR"] = 0.9
+        exit_cfg["mfeGivebackPct"] = 0.46
+        exit_cfg["breakevenDelayR"] = 0.5
+        risk["riskPips"] = max(20.0, _num(risk.get("riskPips"), 10.0))
+    seed["direction"] = "SHORT"
+    risk["opportunityLotMultiplier"] = min(0.28, _num(risk.get("opportunityLotMultiplier"), 0.35))
+    _tighten_family_entry(seed, offset, strong=False)
+
+
+def _apply_tokyo_range_profile(seed: Dict[str, Any], profile: str, offset: int) -> None:
+    indicators = seed.setdefault("indicators", {})
+    tokyo = indicators.setdefault("tokyoRange", {})
+    exit_cfg = seed.setdefault("exit", {})
+    risk = seed.setdefault("risk", {})
+    tokyo["timeframe"] = "M15"
+    if profile.endswith("SAMPLE_EXPANDER"):
+        tokyo["rangeStartHourUtc"] = 0
+        tokyo["rangeEndHourUtc"] = 2
+        tokyo["tradeStartHourUtc"] = 3
+        tokyo["tradeEndHourUtc"] = 7
+        tokyo["lookbackBars"] = max(5, min(14, int(_num(tokyo.get("lookbackBars"), 8) - 2)))
+        tokyo["bufferPips"] = round(max(0.4, min(4.0, _num(tokyo.get("bufferPips"), 0.0) + 0.4)), 2)
+        _set_exit(seed, hold_h1=4, hold_m15=6)
+        exit_cfg["trailStartR"] = 1.0
+        exit_cfg["mfeGivebackPct"] = 0.5
+        exit_cfg["breakevenDelayR"] = 0.7
+        risk["riskPips"] = max(16.0, _num(risk.get("riskPips"), 10.0))
+    elif profile.endswith("FAST_EXIT"):
+        tokyo["rangeStartHourUtc"] = 0
+        tokyo["rangeEndHourUtc"] = 2
+        tokyo["tradeStartHourUtc"] = 3
+        tokyo["tradeEndHourUtc"] = 4
+        tokyo["lookbackBars"] = max(6, min(18, int(_num(tokyo.get("lookbackBars"), 8))))
+        tokyo["bufferPips"] = round(max(1.5, min(7.0, _num(tokyo.get("bufferPips"), 0.0) + 1.5)), 2)
+        _set_exit(seed, hold_h1=2, hold_m15=3)
+        exit_cfg["trailStartR"] = 0.75
+        exit_cfg["mfeGivebackPct"] = 0.42
+        exit_cfg["breakevenDelayR"] = 0.4
+        risk["riskPips"] = max(16.0, _num(risk.get("riskPips"), 10.0))
+    elif profile.endswith("BUFFERED_BREAKOUT"):
+        tokyo["rangeStartHourUtc"] = 0
+        tokyo["rangeEndHourUtc"] = 2
+        tokyo["tradeStartHourUtc"] = 3
+        tokyo["tradeEndHourUtc"] = 5
+        tokyo["lookbackBars"] = max(10, min(24, int(_num(tokyo.get("lookbackBars"), 8) + 4)))
+        tokyo["bufferPips"] = round(max(2.0, min(9.0, _num(tokyo.get("bufferPips"), 0.0) + 2.0)), 2)
+        _set_exit(seed, hold_h1=3, hold_m15=4)
+        exit_cfg["trailStartR"] = 0.9
+        exit_cfg["mfeGivebackPct"] = 0.46
+        exit_cfg["breakevenDelayR"] = 0.5
+        risk["riskPips"] = max(20.0, _num(risk.get("riskPips"), 10.0))
+    else:
+        start = 3 + (offset % 2)
+        tokyo["rangeStartHourUtc"] = 0
+        tokyo["rangeEndHourUtc"] = 2
+        tokyo["tradeStartHourUtc"] = start
+        tokyo["tradeEndHourUtc"] = start + 2
+        tokyo["lookbackBars"] = max(8, min(20, int(_num(tokyo.get("lookbackBars"), 8) + 2)))
+        tokyo["bufferPips"] = round(max(1.0, min(8.0, _num(tokyo.get("bufferPips"), 0.0) + 1.0)), 2)
+        _set_exit(seed, hold_h1=3, hold_m15=4)
+        exit_cfg["trailStartR"] = 0.85
+        exit_cfg["mfeGivebackPct"] = 0.45
+        exit_cfg["breakevenDelayR"] = 0.5
+        risk["riskPips"] = max(18.0, _num(risk.get("riskPips"), 10.0))
+    risk["opportunityLotMultiplier"] = min(0.3, _num(risk.get("opportunityLotMultiplier"), 0.35))
 
 
 def _set_exit(seed: Dict[str, Any], hold_h1: int, hold_m15: int) -> None:
@@ -535,7 +700,7 @@ def _repair_reason_zh(blocker: str, profile: str) -> str:
         return "针对最大逆行过高，放宽 stop R 分母、缩短持仓并收紧入场。"
     if profile.startswith("LOW_SAMPLE"):
         return "针对样本不足，放宽触发条件并切到更高样本密度周期。"
-    if blocker in {"WALK_FORWARD_UNSTABLE", "OVERFIT_RISK_HIGH"}:
+    if blocker in {"WALK_FORWARD_UNSTABLE", "OVERFIT_RISK", "OVERFIT_RISK_HIGH"}:
         return "针对 walk-forward 不稳定，缩短持仓、提前保护盈利并降低参数自由度。"
     return "针对未晋级候选做保守质量修复，继续留在 shadow 评分。"
 
@@ -550,8 +715,10 @@ def _quality_repair_sort_key(row: Dict[str, Any]) -> tuple:
     blocker_score = {
         "MAX_ADVERSE_TOO_HIGH": 4,
         "WALK_FORWARD_UNSTABLE": 4,
+        "OVERFIT_RISK": 4,
         "OVERFIT_RISK_HIGH": 3,
         "INSUFFICIENT_SAMPLES": 3,
+        "STRATEGY_BACKTEST_NO_TRADES": 3,
         "WALK_FORWARD_INSUFFICIENT": 3,
         "FITNESS_NOT_POSITIVE": 2,
     }.get(blocker, 1)

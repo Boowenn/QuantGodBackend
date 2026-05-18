@@ -395,6 +395,98 @@ class USDJPYStrategyBacktestTests(unittest.TestCase):
             self.assertTrue(validate_strategy_json(repair)["valid"])
             self.assertTrue(any(seed.get("source") == "QUALITY_REPAIR" for seed in population))
 
+    def test_ga_quality_repair_adds_bb_short_family_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            ga_dir = runtime_dir / "ga"
+            ga_dir.mkdir(parents=True)
+            parent = base_strategy_seed("PARENT-BB-SHORT", family="BB_Triple", direction="SHORT")
+            parent["indicators"]["bollinger"]["deviations"] = 2.0
+            parent["indicators"]["bollinger"]["reclaimBufferPips"] = 0.0
+            row = {
+                "generation": 7,
+                "rank": 1,
+                "fitness": -2.5,
+                "blockerCode": "WALK_FORWARD_UNSTABLE",
+                "strategyJson": parent,
+                "fitnessBreakdown": {
+                    "strategyBacktest": {"netR": 2.0, "tradeCount": 64},
+                    "walkForward": {"summary": {"stabilityScore": 0.12}},
+                },
+            }
+            (ga_dir / "QuantGod_GACandidateRuns.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            repair = quality_repair_seed_pool(runtime_dir, generation_number=8, limit=3)[0]
+            bollinger = repair["indicators"]["bollinger"]
+
+            self.assertEqual(repair["qualityProfile"], "BB_SHORT_RECLAIM_STABILIZER")
+            self.assertEqual(repair["direction"], "SHORT")
+            self.assertGreaterEqual(bollinger["deviations"], 2.15)
+            self.assertGreaterEqual(bollinger["reclaimBufferPips"], 1.0)
+            self.assertLessEqual(repair["exit"]["timeStopBars"]["H1"], 3)
+            self.assertTrue(validate_strategy_json(repair)["valid"])
+
+    def test_ga_quality_repair_expands_bb_short_samples_after_stability_tightening(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            ga_dir = runtime_dir / "ga"
+            ga_dir.mkdir(parents=True)
+            parent = base_strategy_seed("PARENT-BB-SAMPLE", family="BB_Triple", direction="SHORT")
+            parent["indicators"]["bollinger"]["deviations"] = 2.4
+            parent["indicators"]["bollinger"]["reclaimBufferPips"] = 2.0
+            row = {
+                "generation": 10,
+                "rank": 2,
+                "fitness": -2.3,
+                "blockerCode": "INSUFFICIENT_SAMPLES",
+                "strategyJson": parent,
+                "fitnessBreakdown": {
+                    "strategyBacktest": {"netR": 1.2, "tradeCount": 4},
+                    "walkForward": {"summary": {"stabilityScore": 0.2}},
+                },
+            }
+            (ga_dir / "QuantGod_GACandidateRuns.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            repair = quality_repair_seed_pool(runtime_dir, generation_number=11, limit=3)[0]
+            bollinger = repair["indicators"]["bollinger"]
+
+            self.assertEqual(repair["qualityProfile"], "BB_SHORT_SAMPLE_EXPANDER")
+            self.assertLessEqual(bollinger["deviations"], parent["indicators"]["bollinger"]["deviations"])
+            self.assertLessEqual(bollinger["reclaimBufferPips"], 3.0)
+            self.assertGreaterEqual(repair["exit"]["timeStopBars"]["H1"], 3)
+            self.assertTrue(validate_strategy_json(repair)["valid"])
+
+    def test_ga_quality_repair_adds_tokyo_range_family_template(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            ga_dir = runtime_dir / "ga"
+            ga_dir.mkdir(parents=True)
+            parent = base_strategy_seed("PARENT-TOKYO", family="USDJPY_TOKYO_RANGE_BREAKOUT", direction="SHORT")
+            parent["indicators"]["tokyoRange"]["bufferPips"] = 0.0
+            row = {
+                "generation": 7,
+                "rank": 2,
+                "fitness": -10.2,
+                "blockerCode": "WALK_FORWARD_UNSTABLE",
+                "strategyJson": parent,
+                "fitnessBreakdown": {
+                    "strategyBacktest": {"netR": -1.0, "tradeCount": 120},
+                    "walkForward": {"summary": {"stabilityScore": 0.08}},
+                },
+            }
+            (ga_dir / "QuantGod_GACandidateRuns.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            repair = quality_repair_seed_pool(runtime_dir, generation_number=8, limit=3)[0]
+            tokyo = repair["indicators"]["tokyoRange"]
+
+            self.assertEqual(repair["qualityProfile"], "TOKYO_RANGE_SESSION_STABILIZER")
+            self.assertEqual(tokyo["timeframe"], "M15")
+            self.assertEqual(tokyo["rangeStartHourUtc"], 0)
+            self.assertEqual(tokyo["rangeEndHourUtc"], 2)
+            self.assertGreaterEqual(tokyo["bufferPips"], 1.0)
+            self.assertLessEqual(tokyo["tradeEndHourUtc"] - tokyo["tradeStartHourUtc"], 2)
+            self.assertTrue(validate_strategy_json(repair)["valid"])
+
     def test_history_sync_pulls_incremental_usdjpy_bars_from_mt5(self):
         class FakeMT5(types.SimpleNamespace):
             TIMEFRAME_M1 = "M1"

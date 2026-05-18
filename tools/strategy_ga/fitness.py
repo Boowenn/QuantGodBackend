@@ -182,6 +182,7 @@ def evidence_metrics(runtime_dir: Path, seed: Dict[str, Any] | None = None) -> D
 def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
     metrics = evidence_metrics(runtime_dir, seed)
     backtest = metrics.get("strategyBacktest", {})
+    backtest_trade_count = int(_num(backtest.get("tradeCount"), 0))
     family = seed.get("strategyFamily", "")
     direction = seed.get("direction", "")
     sample_count = metrics["sampleCount"]
@@ -197,6 +198,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         _num(walk_forward_summary.get("overfitPenalty"), 0),
         0.25 if metrics["validationNetRDelta"] < 0 or metrics["forwardNetRDelta"] < 0 else 0.0,
     )
+    backtest_no_trade_penalty = 2.0 if backtest.get("present") and backtest.get("ok") and backtest_trade_count == 0 else 0.0
     trade_frequency_penalty = 0.15 if sample_count == 0 else 0.0
     evidence_penalty = float(metrics.get("evidencePenalty", 0.0))
     strategy_contract_shadow_bonus = _strategy_contract_shadow_bonus(metrics.get("strategyContractShadow", {}))
@@ -218,6 +220,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         - max_drawdown_penalty
         - max_adverse_penalty
         - overfit_penalty
+        - backtest_no_trade_penalty
         - walk_forward_penalty
         - low_sample_penalty
         - trade_frequency_penalty
@@ -231,6 +234,8 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         blocker = "STRATEGY_BACKTEST_FAILED"
     elif history_production.get("promotionGateStatus") == "BLOCKED":
         blocker = "HISTORY_PRODUCTION_NOT_READY"
+    elif backtest_trade_count == 0:
+        blocker = "STRATEGY_BACKTEST_NO_TRADES"
     elif sample_count < 5:
         blocker = "INSUFFICIENT_SAMPLES"
     elif walk_forward_summary.get("promotionGateStatus") == "BLOCKED":
@@ -251,6 +256,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         **metrics,
         "fitness": round(fitness, 4),
         "overfitPenalty": round(overfit_penalty, 4),
+        "backtestNoTradePenalty": round(backtest_no_trade_penalty, 4),
         "walkForwardPenalty": round(walk_forward_penalty, 4),
         "walkForwardStabilityBonus": round(walk_forward_stability_bonus, 4),
         "lowSamplePenalty": round(low_sample_penalty, 4),
