@@ -155,9 +155,75 @@ def _read_csv(path: Path) -> List[Dict[str, Any]]:
         return []
 
 
+def _source_kind(source: str) -> str:
+    source_lower = source.lower()
+    if "liveexecutionfeedbackhistory" in source_lower:
+        return "live_feedback_history"
+    if "liveexecutionfeedback" in source_lower:
+        return "live_execution_feedback"
+    if "closehistory" in source_lower:
+        return "close_history"
+    if "eadryrun" in source_lower or "dryrun" in source_lower:
+        return "ea_dry_run"
+    if "liveloopledger" in source_lower or "live_loop" in source_lower:
+        return "live_loop_advisory"
+    if "tradejournal" in source_lower:
+        return "trade_journal"
+    if "tradeeventlinks" in source_lower:
+        return "trade_event_links"
+    if "tradeoutcomelabels" in source_lower:
+        return "trade_outcome_labels"
+    if "shadow" in source_lower:
+        return "shadow_outcome"
+    return "unknown"
+
+
+def _infer_event_type(row: Dict[str, Any], source_kind: str) -> Any:
+    explicit = _first(row, "eventType", "EventType", "event", "type")
+    if explicit:
+        return str(explicit).upper()
+    mapping = {
+        "close_history": "LIVE_EXIT",
+        "ea_dry_run": "EA_DRY_RUN_DECISION",
+        "live_loop_advisory": "LIVE_LOOP_DECISION",
+        "trade_event_links": "TRADE_EVENT_LINK",
+        "trade_outcome_labels": "TRADE_OUTCOME",
+        "trade_journal": "TRADE_JOURNAL",
+        "shadow_outcome": "SHADOW_EXIT",
+    }
+    return mapping.get(source_kind)
+
+
+def _source_tier(source_kind: str, event_type: Any, fill_price: float) -> str:
+    event = str(event_type or "").upper()
+    if source_kind == "live_execution_feedback" and event in FILL_EVENT_TYPES | CLOSE_EVENT_TYPES:
+        if fill_price:
+            return "live_real_fill"
+    if source_kind in {"close_history", "trade_journal"}:
+        return "mt5_close_history"
+    if source_kind in {"ea_dry_run", "live_loop_advisory"}:
+        return "ea_shadow"
+    if source_kind == "shadow_outcome":
+        return "strategy_shadow"
+    if source_kind in {"live_feedback_history", "trade_event_links", "trade_outcome_labels"}:
+        return "backfilled_history"
+    return "unknown"
+
+
+def _execution_mode(source_kind: str, source_tier: str) -> str:
+    if source_tier in {"live_real_fill", "mt5_close_history"}:
+        return "LIVE"
+    if source_tier in {"ea_shadow", "strategy_shadow"}:
+        return "SHADOW"
+    if source_kind in {"live_execution_feedback", "close_history", "trade_journal"}:
+        return "LIVE"
+    return "UNKNOWN"
+
+
 def _normalize_row(index: int, row: Dict[str, Any], source: str) -> Dict[str, Any]:
     symbol = _first(row, "symbol", "Symbol") or FOCUS_SYMBOL
-    event_type = _first(row, "eventType", "EventType")
+    kind = str(_first(row, "sourceKind", "SourceKind") or _source_kind(source))
+    event_type = _infer_event_type(row, kind)
     expected_price = _num(_first(row, "expectedPrice", "entryPrice", "EntryPrice", "openPrice"))
     fill_price = _num(_first(row, "fillPrice", "price", "Price", "exitPrice", "ClosePrice"))
     slippage_pips = _num(_first(row, "slippagePips", "SlippagePips"))
@@ -170,12 +236,15 @@ def _normalize_row(index: int, row: Dict[str, Any], source: str) -> Dict[str, An
     raw_intent_id = _first(row, "intentId", "IntentId")
     raw_strategy_id = _first(row, "strategyId", "strategy", "Strategy")
     raw_field_presence = _field_presence(row, source, event_type, retcode)
+    tier = str(_first(row, "sourceTier", "SourceTier") or _source_tier(kind, event_type, fill_price))
+    execution_mode = str(_first(row, "executionMode", "ExecutionMode", "lane", "mode") or _execution_mode(kind, tier))
     return {
         "schema": "quantgod.live_execution_feedback.v1",
         "feedbackId": feedback_id,
         "createdAt": utc_now_iso(),
         "symbol": symbol,
         "eventType": event_type,
+        "executionMode": execution_mode,
         "side": _first(row, "side", "Side"),
         "policyId": raw_policy_id or "USDJPY_LIVE_LOOP",
         "intentId": raw_intent_id or feedback_id,
@@ -195,6 +264,8 @@ def _normalize_row(index: int, row: Dict[str, Any], source: str) -> Dict[str, An
         "mfeR": _num(_first(row, "mfeR", "MfeR")),
         "maeR": _num(_first(row, "maeR", "MaeR")),
         "source": source,
+        "sourceKind": kind,
+        "sourceTier": tier,
         "fieldPresence": raw_field_presence,
         "sourceKeys": sorted(row.keys())[:20],
         "safety": dict(SAFETY_BOUNDARY),
@@ -758,6 +829,10 @@ def _is_live_lane_entry_row(row: Dict[str, Any]) -> bool:
 
 
 def _is_advisory_normalized_row(row: Dict[str, Any]) -> bool:
+    source = str(row.get("source") or "")
+    source_kind = str(row.get("sourceKind") or "")
+    if source in ADVISORY_FEEDBACK_SOURCES or source_kind in {"ea_dry_run", "live_loop_advisory"}:
+        return True
     event_type = str(row.get("eventType") or "").strip()
     if event_type:
         return False

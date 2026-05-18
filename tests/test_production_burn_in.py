@@ -31,6 +31,8 @@ class ProductionBurnInTests(unittest.TestCase):
             },
             {"sourceKind": "shadow_outcome", "source": "QuantGod_ShadowOutcomeLedger.csv"},
             {"source": "QuantGod_USDJPYEADryRunDecisionLedger.csv"},
+            {"sourceKind": "live_loop_advisory", "source": "QuantGod_USDJPYLiveLoopLedger.csv"},
+            {"sourceKind": "trade_journal", "source": "QuantGod_TradeJournal.csv"},
             {"source": "QuantGod_LiveExecutionFeedbackHistory.jsonl"},
         ]
         tiers = [classify_source_tier(row) for row in rows]
@@ -39,10 +41,12 @@ class ProductionBurnInTests(unittest.TestCase):
         self.assertEqual(tiers[2], "live_real_fill")
         self.assertEqual(tiers[3], "strategy_shadow")
         self.assertEqual(tiers[4], "ea_shadow")
-        self.assertEqual(tiers[5], "backfilled_history")
+        self.assertEqual(tiers[5], "ea_shadow")
+        self.assertEqual(tiers[6], "mt5_close_history")
+        self.assertEqual(tiers[7], "backfilled_history")
         attribution = build_source_attribution(rows)
         self.assertEqual(attribution["liveRealFillCount"], 2)
-        self.assertEqual(attribution["shadowSampleCount"], 2)
+        self.assertEqual(attribution["shadowSampleCount"], 3)
 
     def test_burn_in_report_writes_report_and_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

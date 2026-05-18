@@ -74,12 +74,18 @@ def classify_source_tier(row: dict[str, Any]) -> str:
         return "live_real_fill"
     if source_kind == "close_history" or "closehistory" in source_lower or "close_history" in source_lower:
         return "mt5_close_history"
+    if source_kind == "trade_journal" or "tradejournal" in source_lower:
+        return "mt5_close_history"
+    if source_kind in {"ea_dry_run", "live_loop_advisory"}:
+        return "ea_shadow"
     if "eadryrun" in source_lower or "ea_dry" in source_lower or "dryrun" in source_lower:
         return "ea_shadow"
     if "live_loop" in source_lower or "livedecision" in source_lower:
         return "ea_shadow"
     if source_kind == "shadow_outcome" or "shadow" in source_lower:
         return "strategy_shadow"
+    if source_kind in {"trade_event_links", "trade_outcome_labels", "live_feedback_history"}:
+        return "backfilled_history"
     if "history" in source_lower or "backfill" in source_lower or "evidence_os" in source_lower:
         return "backfilled_history"
     if source_kind == "existing_feedback":

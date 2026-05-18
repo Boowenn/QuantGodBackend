@@ -40,6 +40,8 @@ test('P4-9 exposes burn-in and source attribution markers', () => {
   assert.ok(maintenance.includes('build_burn_in_report'), 'missing burn-in maintenance runner');
   assert.ok(maintenance.includes('QG_PRODUCTION_BURN_IN_INTERVAL_SECONDS'), 'missing burn-in throttle');
   assert.ok(readFileSync('tools/run_mac_agent_v25_loop.sh', 'utf8').includes('--force-burn-in'));
+  assert.ok(readFileSync('tools/run_mac_agent_v25_loop.sh', 'utf8').includes('QG_AGENT_V25_LOCK_DIR'));
+  assert.ok(readFileSync('tools/production_evidence_validation/execution_feedback_audit.py', 'utf8').includes('sourceKind'));
   assert.ok(burnIn.includes('PRODUCTION_BURN_IN_REPORT'), 'missing burn-in report');
   assert.ok(burnIn.includes('PRODUCTION_BURN_IN_LEDGER'), 'missing burn-in ledger');
   for (const tier of ['live_real_fill', 'mt5_close_history', 'ea_shadow', 'strategy_shadow', 'backfilled_history']) {

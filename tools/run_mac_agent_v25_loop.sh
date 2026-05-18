@@ -68,6 +68,56 @@ RUNTIME_DIR="$(resolve_runtime_dir)"
 export QG_RUNTIME_DIR="${QG_RUNTIME_DIR:-$RUNTIME_DIR}"
 export QG_MT5_FILES_DIR="${QG_MT5_FILES_DIR:-$RUNTIME_DIR}"
 
+MODE="--loop"
+if [[ "${1:-}" == "--once" ]]; then
+  MODE="--once"
+  shift
+elif [[ "${1:-}" == "--loop" ]]; then
+  MODE="--loop"
+  shift
+fi
+
+LOCK_DIR="${QG_AGENT_V25_LOCK_DIR:-$RUNTIME_DIR/agent/QuantGod_AgentV25Loop.lock}"
+LOCK_OWNER=0
+
+process_is_agent_loop() {
+  local pid="$1"
+  local command
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" >/dev/null 2>&1 || return 1
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [[ "$command" == *"run_mac_agent_v25_loop.sh"* ]]
+}
+
+release_loop_lock() {
+  local holder=""
+  [[ "$LOCK_OWNER" == "1" ]] || return 0
+  holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  if [[ "$holder" == "$$" ]]; then
+    rm -rf "$LOCK_DIR"
+  fi
+}
+
+acquire_loop_lock() {
+  local holder=""
+  local holder_mode=""
+  mkdir -p "$(dirname "$LOCK_DIR")"
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    holder_mode="$(cat "$LOCK_DIR/mode" 2>/dev/null || true)"
+    if process_is_agent_loop "$holder"; then
+      echo "Agent v2.5 loop already running: pid=$holder mode=${holder_mode:-unknown} runtime=$RUNTIME_DIR"
+      exit 0
+    fi
+    rm -rf "$LOCK_DIR"
+  done
+  LOCK_OWNER=1
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
+  printf '%s\n' "$MODE" > "$LOCK_DIR/mode"
+  date -u '+%Y-%m-%dT%H:%M:%SZ' > "$LOCK_DIR/acquired_at"
+  trap release_loop_lock EXIT INT TERM
+}
+
 write_loop_status() {
   local status="$1"
   local detail="$2"
@@ -128,14 +178,7 @@ run_maintenance() {
     --force-burn-in || echo "Agent v2.5 maintenance failed"
 }
 
-MODE="--loop"
-if [[ "${1:-}" == "--once" ]]; then
-  MODE="--once"
-  shift
-elif [[ "${1:-}" == "--loop" ]]; then
-  MODE="--loop"
-  shift
-fi
+acquire_loop_lock
 
 run_once() {
   write_loop_status "RUNNING" "Agent v2.5 后台循环开始执行。"

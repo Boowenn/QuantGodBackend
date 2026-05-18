@@ -126,6 +126,9 @@ test('evidence OS remains read-only and feeds GA scoring', () => {
   assert.match(source, /run_mac_agent_v25_maintenance\.py/);
   assert.match(source, /QG_AGENT_OPS_HEALTH_ENABLED/);
   assert.match(source, /QG_PRODUCTION_BURN_IN_INTERVAL_SECONDS/);
+  assert.match(source, /QG_AGENT_V25_LOCK_DIR/);
+  assert.match(source, /acquire_loop_lock/);
+  assert.match(source, /release_loop_lock/);
   assert.match(source, /polymarketRetune/);
   assert.match(source, /telegramGateway/);
   assert.match(source, /dailyAutopilot/);

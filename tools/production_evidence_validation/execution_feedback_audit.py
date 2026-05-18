@@ -43,6 +43,8 @@ MIN_PRODUCTION_SAMPLES = 20
 MIN_FIELD_COVERAGE = 0.80
 MIN_CORE_COVERAGE = 0.95
 
+FILL_OR_CLOSE_EVENTS = {"ORDER_FILL", "ORDER_CLOSE", "LIVE_ENTRY", "LIVE_EXIT", "FILL", "CLOSE", "LIVE_FILL"}
+
 
 def _is_missing(value: Any) -> bool:
     return value is None or value == "" or value == [] or value == {}
@@ -55,6 +57,100 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _source_name(row: dict[str, Any]) -> str:
+    return str(row.get("source") or row.get("feedbackSource") or row.get("executionSource") or "")
+
+
+def _infer_source_kind(row: dict[str, Any]) -> str:
+    explicit = str(row.get("sourceKind") or "").strip()
+    if explicit:
+        return explicit
+    source = _source_name(row).lower()
+    if "liveexecutionfeedbackhistory" in source:
+        return "live_feedback_history"
+    if "liveexecutionfeedback" in source:
+        return "live_execution_feedback"
+    if "closehistory" in source:
+        return "close_history"
+    if "eadryrun" in source or "dryrun" in source:
+        return "ea_dry_run"
+    if "liveloopledger" in source or "live_loop" in source:
+        return "live_loop_advisory"
+    if "tradejournal" in source:
+        return "trade_journal"
+    if "tradeeventlinks" in source:
+        return "trade_event_links"
+    if "tradeoutcomelabels" in source:
+        return "trade_outcome_labels"
+    if "shadow" in source:
+        return "shadow_outcome"
+    return "unknown"
+
+
+def _infer_event_type(row: dict[str, Any], source_kind: str) -> str:
+    explicit = str(row.get("eventType") or row.get("event") or row.get("type") or "").strip().upper()
+    if explicit:
+        return explicit
+    mapping = {
+        "close_history": "LIVE_EXIT",
+        "ea_dry_run": "EA_DRY_RUN_DECISION",
+        "live_loop_advisory": "LIVE_LOOP_DECISION",
+        "trade_event_links": "TRADE_EVENT_LINK",
+        "trade_outcome_labels": "TRADE_OUTCOME",
+        "trade_journal": "TRADE_JOURNAL",
+        "shadow_outcome": "SHADOW_EXIT",
+    }
+    return mapping.get(source_kind, "")
+
+
+def _infer_source_tier(row: dict[str, Any], source_kind: str, event_type: str) -> str:
+    explicit = str(row.get("sourceTier") or row.get("sourceAttribution") or "").strip().lower()
+    if explicit:
+        return explicit
+    if source_kind == "live_execution_feedback" and event_type in FILL_OR_CLOSE_EVENTS:
+        if row.get("fillPrice") not in (None, "", 0, "0"):
+            return "live_real_fill"
+    if source_kind in {"close_history", "trade_journal"}:
+        return "mt5_close_history"
+    if source_kind in {"ea_dry_run", "live_loop_advisory"}:
+        return "ea_shadow"
+    if source_kind == "shadow_outcome":
+        return "strategy_shadow"
+    if source_kind in {"live_feedback_history", "trade_event_links", "trade_outcome_labels"}:
+        return "backfilled_history"
+    return "unknown"
+
+
+def _infer_execution_mode(row: dict[str, Any], source_kind: str, source_tier: str) -> str:
+    explicit = str(row.get("executionMode") or row.get("lane") or row.get("mode") or "").strip().upper()
+    if explicit:
+        return explicit
+    if source_tier in {"live_real_fill", "mt5_close_history"}:
+        return "LIVE"
+    if source_tier in {"ea_shadow", "strategy_shadow"}:
+        return "SHADOW"
+    if source_kind in {"live_execution_feedback", "close_history", "trade_journal"}:
+        return "LIVE"
+    return ""
+
+
+def _normalize_audit_row(row: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(row)
+    source_kind = _infer_source_kind(normalized)
+    event_type = _infer_event_type(normalized, source_kind)
+    source_tier = _infer_source_tier(normalized, source_kind, event_type)
+    execution_mode = _infer_execution_mode(normalized, source_kind, source_tier)
+    if _is_missing(normalized.get("sourceKind")):
+        normalized["sourceKind"] = source_kind
+    if _is_missing(normalized.get("eventType")) and event_type:
+        normalized["eventType"] = event_type
+    if _is_missing(normalized.get("sourceTier")):
+        normalized["sourceTier"] = source_tier
+    if _is_missing(normalized.get("executionMode")) and execution_mode:
+        normalized["executionMode"] = execution_mode
+    return normalized
 
 
 def _row_mode(row: dict[str, Any]) -> str:
@@ -124,7 +220,7 @@ def audit_execution_feedback(runtime_dir: Path) -> dict[str, Any]:
     report_path = runtime_dir / "execution" / "QuantGod_LiveExecutionQualityReport.json"
     ledger_path = runtime_dir / "execution" / "QuantGod_LiveExecutionFeedback.jsonl"
     report = read_json(report_path, {}) or {}
-    rows = read_jsonl(ledger_path, 5000)
+    rows = [_normalize_audit_row(row) for row in read_jsonl(ledger_path, 5000)]
     sample_count = len(rows)
 
     full_field_coverage, present_by_field = _field_coverage(rows, REQUIRED_FIELDS)

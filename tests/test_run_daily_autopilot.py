@@ -284,6 +284,9 @@ class DailyAutopilotTests(unittest.TestCase):
         self.assertIn("run_mac_agent_v25_maintenance.py", agent_loop)
         self.assertIn("QG_PRODUCTION_BURN_IN_INTERVAL_SECONDS", agent_loop)
         self.assertIn("--force-burn-in", agent_loop)
+        self.assertIn("QG_AGENT_V25_LOCK_DIR", agent_loop)
+        self.assertIn("acquire_loop_lock", agent_loop)
+        self.assertIn("release_loop_lock", agent_loop)
 
         supervisor = (repo_root / "tools" / "ensure_mac_agent_v25_loop.sh").read_text(encoding="utf-8")
         self.assertIn("QuantGod_AgentV25LoopStatus.json", supervisor)

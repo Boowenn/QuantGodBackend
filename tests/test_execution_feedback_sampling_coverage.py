@@ -61,6 +61,51 @@ class ExecutionFeedbackSamplingCoverageTests(unittest.TestCase):
             self.assertIn(report["coverageGrade"], {"CORE_FIELD_GAPS", "FIELD_GAPS"})
             self.assertGreater(report["missingFieldCounts"].get("profitR", 0), 0)
 
+    def test_advisory_sources_get_event_and_source_attribution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            execution_dir = runtime / "execution"
+            execution_dir.mkdir(parents=True)
+            rows = []
+            for index in range(10):
+                rows.append(
+                    {
+                        "source": "QuantGod_USDJPYLiveLoopLedger.csv",
+                        "strategyId": "RSI_Reversal",
+                        "expectedPrice": 155.1,
+                        "fillPrice": 155.1,
+                        "slippagePips": 0.0,
+                        "latencyMs": 0,
+                        "spreadAtEntry": 0.0,
+                        "profitR": 0.0,
+                        "mfeR": 0.0,
+                        "maeR": 0.0,
+                    }
+                )
+                rows.append(
+                    {
+                        "source": "QuantGod_USDJPYEADryRunDecisionLedger.csv",
+                        "strategyId": "RSI_Reversal",
+                        "expectedPrice": 155.1,
+                        "fillPrice": 155.1,
+                        "slippagePips": 0.0,
+                        "latencyMs": 0,
+                        "spreadAtEntry": 0.0,
+                        "profitR": 0.0,
+                        "mfeR": 0.0,
+                        "maeR": 0.0,
+                    }
+                )
+            with (execution_dir / "QuantGod_LiveExecutionFeedback.jsonl").open("w", encoding="utf-8") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row) + "\n")
+
+            report = audit_execution_feedback(runtime)
+
+            self.assertEqual(report["missingFieldCounts"].get("eventType"), 0)
+            self.assertEqual(report["sourceAttribution"]["tierCounts"].get("ea_shadow"), 20)
+            self.assertEqual(report["sourceAttribution"]["sourceKindCounts"].get("unknown"), None)
+
 
 if __name__ == "__main__":
     unittest.main()
