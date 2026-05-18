@@ -15,7 +15,7 @@ from tools.strategy_ga.seed_generator import exploration_seed_pool
 from tools.strategy_json.fingerprint import strategy_fingerprint
 from tools.strategy_json.schema import base_strategy_seed
 from tools.strategy_json.validator import validate_strategy_json
-from tools.usdjpy_strategy_backtest.history_sync import sync_historical_klines
+from tools.usdjpy_strategy_backtest.history_sync import build_history_production_status, sync_historical_klines
 from tools.usdjpy_strategy_backtest.historical_news import classify_historical_news, load_historical_news_events
 from tools.usdjpy_strategy_backtest.report import build_sample, run_backtest, status
 from tools.usdjpy_strategy_backtest.schema import (
@@ -517,6 +517,48 @@ class USDJPYStrategyBacktestTests(unittest.TestCase):
             self.assertEqual(current["historyProductionStatus"]["status"], "PASS")
             with connect(runtime_dir) as conn:
                 self.assertGreaterEqual(count_bars(conn, "M1"), 3 * 24 * 60)
+
+    def test_history_production_allows_small_mt5_server_time_skew(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            checked_at = datetime(2026, 5, 18, 2, 0, tzinfo=timezone.utc)
+            latest = checked_at + timedelta(hours=3)
+            start = checked_at - timedelta(days=10)
+            steps = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600}
+            with connect(runtime_dir) as conn:
+                for timeframe, step in steps.items():
+                    bars = []
+                    cursor = start
+                    index = 0
+                    while cursor <= latest:
+                        price = 156.0 + (index % 20) * 0.001
+                        bars.append(
+                            Bar(
+                                timestamp=cursor.isoformat().replace("+00:00", "Z"),
+                                open=price,
+                                high=price + 0.01,
+                                low=price - 0.01,
+                                close=price + 0.002,
+                                volume=1000,
+                                spread=10,
+                            )
+                        )
+                        cursor += timedelta(seconds=step)
+                        index += 1
+                    upsert_bars(conn, timeframe, bars)
+
+            report = build_history_production_status(
+                runtime_dir,
+                sync_report={"ok": True, "source": "MQL5_COPYRATES_EXPORT_FALLBACK"},
+                target_days=10,
+                max_latest_lag_hours=2,
+                now=checked_at,
+            )
+
+            self.assertEqual(report["status"], "PASS", report)
+            self.assertTrue(report["historyTargetSatisfied"], report)
+            self.assertEqual(report["timeframes"]["M1"]["latestLagHours"], 0.0)
+            self.assertEqual(report["timeframes"]["M1"]["futureSkewHours"], 3.0)
 
 
 if __name__ == "__main__":

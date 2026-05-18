@@ -15,10 +15,10 @@ def _count_items(value: Any) -> int:
     if isinstance(value, list):
         return len(value)
     if isinstance(value, dict):
-        for key in ("items", "candidates", "nodes", "edges", "elite", "graveyard"):
+        for key in ("items", "candidates", "nodes", "edges", "elite", "elites", "graveyard", "strategies"):
             if isinstance(value.get(key), list):
                 return len(value[key])
-        return len(value)
+        return 0
     return 0
 
 
@@ -49,10 +49,15 @@ def audit_ga(runtime_dir: Path) -> dict[str, Any]:
         "currentGeneration": generation,
         "candidateCount": candidate_count,
         "eliteCount": elite_count,
+        "eliteGenerationCount": stability.get("eliteGenerationCount", 0),
+        "eliteRepeatCount": stability.get("eliteRepeatCount", 0),
+        "eliteRepeatEvidence": stability.get("eliteRepeatEvidence", []),
         "graveyardCount": graveyard_count,
         "lineageNodeCount": lineage_nodes,
         "ledgerRows": len(ledger),
         "stabilityGrade": stability.get("stabilityGrade"),
+        "closureMode": stability.get("closureMode"),
+        "promotionAllowed": bool(stability.get("promotionAllowed")),
         "evidenceUsability": stability.get("evidenceUsability"),
         "generationCount": stability.get("generationCount", 0),
         "lineageEdgeCount": stability.get("lineageEdgeCount", 0),
@@ -67,6 +72,8 @@ def audit_ga(runtime_dir: Path) -> dict[str, Any]:
 
 def _recommendation(status: str, stability: dict[str, Any]) -> str:
     if status == "PASS":
+        if stability.get("stabilityGrade") == "NEGATIVE_SELECTION_CLOSED":
+            return "GA negative selection is closed; keep promotion blocked and expand the next search cycle."
         return "GA multi-generation stability evidence is usable for production observation."
     recommendations = stability.get("recommendationsZh") or []
     if recommendations:

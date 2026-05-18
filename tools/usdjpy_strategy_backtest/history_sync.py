@@ -33,6 +33,7 @@ MT5_TIMEFRAME_ATTRS = {
 CHUNK_DAYS = {"M1": 21, "M5": 60, "M15": 120, "H1": 180, "H4": 372}
 MQL5_EXPORT_SOURCE = "MQL5_COPYRATES_EXPORT_FALLBACK"
 DEFAULT_MAX_LATEST_LAG_HOURS = 96
+MAX_FUTURE_BAR_SKEW_HOURS = 24.0
 
 
 def sync_historical_klines(
@@ -245,10 +246,9 @@ def build_history_production_status(
     for timeframe in DEFAULT_HISTORY_TIMEFRAMES:
         row = coverage.get("timeframes", {}).get(timeframe, {})
         latest = _parse_iso(row.get("latestBar"))
-        latest_lag_hours = (
-            round((checked_at - latest).total_seconds() / 3600.0, 3)
-            if latest is not None and checked_at >= latest
-            else None
+        latest_lag_hours, future_skew_hours = _latest_lag_and_future_skew(
+            checked_at,
+            latest,
         )
         expected_bars = _expected_min_bars(required_span_days, timeframe)
         bar_count = int(row.get("barCount") or 0)
@@ -266,6 +266,7 @@ def build_history_production_status(
             "spanDays": span_days,
             "requiredSpanDays": round(required_span_days, 3),
             "latestLagHours": latest_lag_hours,
+            "futureSkewHours": future_skew_hours,
             "maxLatestLagHours": float(max_latest_lag_hours),
             "spanOk": span_ok,
             "densityOk": density_ok,
@@ -602,6 +603,21 @@ def _parse_iso(value: str | None) -> datetime | None:
         return parsed.astimezone(timezone.utc)
     except Exception:
         return None
+
+
+def _latest_lag_and_future_skew(
+    checked_at: datetime,
+    latest: datetime | None,
+) -> tuple[float | None, float | None]:
+    if latest is None:
+        return None, None
+    lag_hours = (checked_at - latest).total_seconds() / 3600.0
+    if lag_hours >= 0:
+        return round(lag_hours, 3), 0.0
+    future_skew_hours = round(abs(lag_hours), 3)
+    if future_skew_hours <= MAX_FUTURE_BAR_SKEW_HOURS:
+        return 0.0, future_skew_hours
+    return None, future_skew_hours
 
 
 def _epoch_to_iso(value: Any) -> str:

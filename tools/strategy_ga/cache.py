@@ -13,6 +13,8 @@ EVIDENCE_FILES = (
     "replay/usdjpy/QuantGod_USDJPYWalkForwardReport.json",
     "backtest/QuantGod_StrategyBacktestReport.json",
     "backtest/QuantGod_StrategyBacktestQualityReport.json",
+    "backtest/QuantGod_USDJPYHistoryProductionStatus.json",
+    "backtest/QuantGod_USDJPYHistorySyncReport.json",
     "evidence_os/QuantGod_StrategyParityReport.json",
     "evidence_os/QuantGod_LiveExecutionQualityReport.json",
     "evidence_os/QuantGod_CaseMemorySummary.json",
