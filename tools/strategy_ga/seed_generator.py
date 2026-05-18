@@ -31,6 +31,13 @@ QUALITY_REPAIR_BLOCKERS = {
     "OVERFIT_RISK_HIGH",
     "FITNESS_NOT_POSITIVE",
 }
+P4_10D_RSI_FOCUS_BLOCKERS = {
+    "OVERFIT_RISK",
+    "OVERFIT_RISK_HIGH",
+    "WALK_FORWARD_UNSTABLE",
+    "WALK_FORWARD_INSUFFICIENT",
+    "INSUFFICIENT_SAMPLES",
+}
 DANGEROUS_REPAIR_BLOCKERS = {
     "SAFETY_REJECTED",
     "DUPLICATE_STRATEGY",
@@ -299,6 +306,11 @@ def _quality_repair_candidate_rows(runtime_dir: Path) -> List[Dict[str, Any]]:
 def _balanced_quality_repair_rows(rows: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
     selected: List[Dict[str, Any]] = []
     seen: set[str] = set()
+    rsi_focus_limit = max(1, min(3, limit // 2))
+    for row in sorted((row for row in rows if _is_p4_10d_rsi_focus_row(row)), key=_rsi_focus_sort_key, reverse=True):
+        if _selected_family_count(selected, "RSI_Reversal") >= rsi_focus_limit:
+            break
+        _append_balanced_row(selected, seen, row, limit)
     family_priority = [
         "RSI_Reversal",
         "MACD_Divergence",
@@ -326,6 +338,8 @@ def _balanced_quality_repair_rows(rows: List[Dict[str, Any]], limit: int) -> Lis
         for row in rows:
             if str(row.get("blockerCode") or "") != blocker:
                 continue
+            if _row_family(row) == "RSI_Reversal" and _selected_family_count(selected, "RSI_Reversal") >= rsi_focus_limit:
+                continue
             if _append_balanced_row(selected, seen, row, limit):
                 break
     for row in rows:
@@ -333,6 +347,46 @@ def _balanced_quality_repair_rows(rows: List[Dict[str, Any]], limit: int) -> Lis
             break
         _append_balanced_row(selected, seen, row, limit)
     return selected
+
+
+def _selected_family_count(rows: List[Dict[str, Any]], family: str) -> int:
+    return sum(1 for row in rows if _row_family(row) == family)
+
+
+def _row_family(row: Dict[str, Any]) -> str:
+    seed = row.get("strategyJson") if isinstance(row.get("strategyJson"), dict) else {}
+    return str(seed.get("strategyFamily") or row.get("strategyFamily") or "")
+
+
+def _is_p4_10d_rsi_focus_row(row: Dict[str, Any]) -> bool:
+    if _row_family(row) != "RSI_Reversal":
+        return False
+    blocker = str(row.get("blockerCode") or "")
+    if blocker not in P4_10D_RSI_FOCUS_BLOCKERS:
+        return False
+    breakdown = row.get("fitnessBreakdown") if isinstance(row.get("fitnessBreakdown"), dict) else {}
+    backtest = breakdown.get("strategyBacktest") if isinstance(breakdown.get("strategyBacktest"), dict) else {}
+    sample_count = int(_num(breakdown.get("sampleCount"), 0))
+    trade_count = int(_num(backtest.get("tradeCount"), 0))
+    return _num(row.get("fitness"), -99.0) > -8.0 or max(sample_count, trade_count) >= 12
+
+
+def _rsi_focus_sort_key(row: Dict[str, Any]) -> tuple:
+    breakdown = row.get("fitnessBreakdown") if isinstance(row.get("fitnessBreakdown"), dict) else {}
+    backtest = breakdown.get("strategyBacktest") if isinstance(breakdown.get("strategyBacktest"), dict) else {}
+    walk_forward = breakdown.get("walkForward") if isinstance(breakdown.get("walkForward"), dict) else {}
+    summary = walk_forward.get("summary") if isinstance(walk_forward.get("summary"), dict) else {}
+    sample_count = int(_num(breakdown.get("sampleCount"), 0))
+    trade_count = int(_num(backtest.get("tradeCount"), 0))
+    blocker = str(row.get("blockerCode") or "")
+    return (
+        1 if blocker in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH"} else 0,
+        min(40, max(sample_count, trade_count)),
+        _num(summary.get("stabilityScore"), 0.0),
+        _num(row.get("fitness"), -99.0),
+        _num(row.get("generation"), 0.0),
+        -_num(row.get("rank"), 9999.0),
+    )
 
 
 def _append_balanced_row(
@@ -402,11 +456,26 @@ def _repair_profiles_for_row(row: Dict[str, Any]) -> List[str]:
                 "BB_SHORT_RECLAIM_WIDE_BAND",
             ]
     elif family == "RSI_Reversal" and blocker in QUALITY_REPAIR_BLOCKERS:
-        family_profiles = [
-            "RSI_REVERSAL_STABILITY_REPAIR",
-            "RSI_REVERSAL_SAMPLE_EXPANDER",
-            "RSI_REVERSAL_FAST_EXIT",
-        ]
+        if blocker in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH"}:
+            family_profiles = [
+                "RSI_REVERSAL_OVERFIT_SAMPLE_EXPANDER",
+                "RSI_REVERSAL_WALK_FORWARD_BALANCER",
+                "RSI_REVERSAL_SEGMENT_SAMPLE_BALANCER",
+                "RSI_REVERSAL_FAST_EXIT",
+            ]
+        elif blocker in {"INSUFFICIENT_SAMPLES", "WALK_FORWARD_INSUFFICIENT", "STRATEGY_BACKTEST_NO_TRADES"}:
+            family_profiles = [
+                "RSI_REVERSAL_SAMPLE_EXPANDER",
+                "RSI_REVERSAL_SEGMENT_SAMPLE_BALANCER",
+                "RSI_REVERSAL_FAST_EXIT",
+            ]
+        else:
+            family_profiles = [
+                "RSI_REVERSAL_WALK_FORWARD_BALANCER",
+                "RSI_REVERSAL_STABILITY_REPAIR",
+                "RSI_REVERSAL_SEGMENT_SAMPLE_BALANCER",
+                "RSI_REVERSAL_FAST_EXIT",
+            ]
     elif family == "MACD_Divergence" and blocker in QUALITY_REPAIR_BLOCKERS:
         family_profiles = [
             "MACD_HISTOGRAM_STABILIZER",
@@ -628,7 +697,40 @@ def _apply_rsi_reversal_profile(seed: Dict[str, Any], profile: str, offset: int)
     exit_cfg = seed.setdefault("exit", {})
     risk = seed.setdefault("risk", {})
     direction = str(seed.get("direction") or "LONG").upper()
-    if profile.endswith("SAMPLE_EXPANDER"):
+    if profile == "RSI_REVERSAL_OVERFIT_SAMPLE_EXPANDER":
+        rsi["timeframe"] = "H1"
+        rsi["period"] = [21, 23, 25][offset % 3]
+        rsi["buyBand"] = [30, 31, 32][offset % 3]
+        rsi["crossbackThreshold"] = [0.45, 0.55, 0.65][offset % 3]
+        _set_exit(seed, hold_h1=[4, 5, 6][offset % 3], hold_m15=[6, 7, 8][offset % 3])
+        exit_cfg["trailStartR"] = [0.9, 1.0, 1.1][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.46, 0.5, 0.54][offset % 3]
+        exit_cfg["breakevenDelayR"] = [0.55, 0.65, 0.75][offset % 3]
+        risk["riskPips"] = max([14.0, 16.0, 18.0][offset % 3], _num(risk.get("riskPips"), 10.0))
+        risk["opportunityLotMultiplier"] = min(0.34, _num(risk.get("opportunityLotMultiplier"), 0.35))
+    elif profile == "RSI_REVERSAL_SEGMENT_SAMPLE_BALANCER":
+        rsi["timeframe"] = "M15"
+        rsi["period"] = [10, 12, 14][offset % 3]
+        rsi["buyBand"] = [36, 38, 40][offset % 3]
+        rsi["crossbackThreshold"] = [0.25, 0.4, 0.55][offset % 3]
+        _set_exit(seed, hold_h1=[4, 5, 6][offset % 3], hold_m15=[6, 8, 10][offset % 3])
+        exit_cfg["trailStartR"] = [0.95, 1.1, 1.25][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.5, 0.54, 0.58][offset % 3]
+        exit_cfg["breakevenDelayR"] = [0.65, 0.8, 0.95][offset % 3]
+        risk["riskPips"] = max([14.0, 16.0, 18.0][offset % 3], _num(risk.get("riskPips"), 10.0))
+        risk["opportunityLotMultiplier"] = min(0.38, _num(risk.get("opportunityLotMultiplier"), 0.35) + 0.02)
+    elif profile == "RSI_REVERSAL_WALK_FORWARD_BALANCER":
+        rsi["timeframe"] = "H1" if offset % 2 else "M15"
+        rsi["period"] = [14, 18, 21][offset % 3]
+        rsi["buyBand"] = [31, 33, 35][offset % 3]
+        rsi["crossbackThreshold"] = [0.7, 0.95, 1.2][offset % 3]
+        _set_exit(seed, hold_h1=[3, 4, 5][offset % 3], hold_m15=[5, 6, 8][offset % 3])
+        exit_cfg["trailStartR"] = [0.9, 1.05, 1.2][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.46, 0.5, 0.54][offset % 3]
+        exit_cfg["breakevenDelayR"] = [0.55, 0.7, 0.85][offset % 3]
+        risk["riskPips"] = max([16.0, 18.0, 20.0][offset % 3], _num(risk.get("riskPips"), 10.0))
+        risk["opportunityLotMultiplier"] = min(0.32, _num(risk.get("opportunityLotMultiplier"), 0.35))
+    elif profile.endswith("SAMPLE_EXPANDER"):
         rsi["timeframe"] = "M15"
         rsi["period"] = max(7, min(16, int(_num(rsi.get("period"), 14) - 3 + (offset % 3))))
         rsi["buyBand"] = max(26, min(42, _num(rsi.get("buyBand"), 34.0) + 2))
@@ -875,6 +977,10 @@ def _enforce_shadow_safety(seed: Dict[str, Any]) -> None:
 
 
 def _repair_reason_zh(blocker: str, profile: str) -> str:
+    if profile.startswith("RSI_REVERSAL_OVERFIT") or profile == "RSI_REVERSAL_SEGMENT_SAMPLE_BALANCER":
+        return "P4-10D 针对 RSI 小样本过拟合，放宽触发并扩大跨分段有效交易样本。"
+    if profile == "RSI_REVERSAL_WALK_FORWARD_BALANCER":
+        return "P4-10D 针对 RSI walk-forward 稳定性，降低参数自由度并平衡持仓退出。"
     if profile.startswith("MAX_ADVERSE"):
         return "针对最大逆行过高，放宽 stop R 分母、缩短持仓并收紧入场。"
     if profile.startswith("LOW_SAMPLE"):

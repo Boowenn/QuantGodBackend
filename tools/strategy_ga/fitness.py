@@ -200,6 +200,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
     )
     backtest_no_trade_penalty = 2.0 if backtest.get("present") and backtest.get("ok") and backtest_trade_count == 0 else 0.0
     trade_frequency_penalty = 0.15 if sample_count == 0 else 0.0
+    rsi_overfit_sample_penalty = _rsi_overfit_sample_penalty(family, direction, sample_count, overfit_penalty)
     evidence_penalty = float(metrics.get("evidencePenalty", 0.0))
     strategy_contract_shadow_bonus = _strategy_contract_shadow_bonus(metrics.get("strategyContractShadow", {}))
     profit_factor_bonus = _profit_factor_bonus(_num(backtest.get("profitFactor"), 0))
@@ -220,6 +221,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         - max_drawdown_penalty
         - max_adverse_penalty
         - overfit_penalty
+        - rsi_overfit_sample_penalty
         - backtest_no_trade_penalty
         - walk_forward_penalty
         - low_sample_penalty
@@ -263,6 +265,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         "maxAdversePenalty": round(max_adverse_penalty, 4),
         "maxDrawdownPenalty": round(max_drawdown_penalty, 4),
         "tradeFrequencyPenalty": round(trade_frequency_penalty, 4),
+        "rsiOverfitSamplePenalty": round(rsi_overfit_sample_penalty, 4),
         "evidencePenalty": round(evidence_penalty, 4),
         "profitFactorBonus": round(profit_factor_bonus, 4),
         "winRateBonus": round(win_rate_bonus, 4),
@@ -279,6 +282,14 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         "historyProductionStatus": metrics.get("historyProductionStatus", {}),
         "walkForward": metrics.get("walkForward", {}),
     }
+
+
+def _rsi_overfit_sample_penalty(family: Any, direction: Any, sample_count: int, overfit_penalty: float) -> float:
+    if family != "RSI_Reversal" or str(direction or "").upper() != "LONG" or overfit_penalty <= 0:
+        return 0.0
+    if sample_count >= 24:
+        return 0.0
+    return round(min(1.2, (24 - max(0, sample_count)) / 12.0), 4)
 
 
 def _execution_penalty(metrics: Dict[str, Any]) -> float:

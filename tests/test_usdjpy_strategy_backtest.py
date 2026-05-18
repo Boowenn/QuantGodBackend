@@ -568,6 +568,46 @@ class USDJPYStrategyBacktestTests(unittest.TestCase):
             self.assertIn("H4_PULLBACK_STABILIZER", profiles)
             self.assertTrue(all(validate_strategy_json(seed)["valid"] for seed in repairs))
 
+    def test_ga_quality_repair_expands_rsi_overfit_samples_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            ga_dir = runtime_dir / "ga"
+            ga_dir.mkdir(parents=True)
+            parent = base_strategy_seed("PARENT-RSI-OVERFIT", family="RSI_Reversal", direction="LONG")
+            parent["indicators"]["rsi"]["timeframe"] = "H1"
+            parent["indicators"]["rsi"]["buyBand"] = 33
+            parent["indicators"]["rsi"]["crossbackThreshold"] = 0.9
+            row = {
+                "generation": 43,
+                "rank": 1,
+                "fitness": 1.86,
+                "blockerCode": "OVERFIT_RISK",
+                "strategyJson": parent,
+                "fitnessBreakdown": {
+                    "sampleCount": 14,
+                    "strategyBacktest": {"netR": 2.78, "tradeCount": 13},
+                    "walkForward": {
+                        "summary": {
+                            "promotionGateStatus": "PASS",
+                            "stabilityScore": 0.95,
+                            "sampleCount": 14,
+                        }
+                    },
+                },
+            }
+            (ga_dir / "QuantGod_GACandidateRuns.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            repair = quality_repair_seed_pool(runtime_dir, generation_number=44, limit=4)[0]
+            rsi = repair["indicators"]["rsi"]
+
+            self.assertEqual(repair["qualityProfile"], "RSI_REVERSAL_OVERFIT_SAMPLE_EXPANDER")
+            self.assertEqual(repair["repairTargetBlocker"], "OVERFIT_RISK")
+            self.assertEqual(rsi["timeframe"], "H1")
+            self.assertGreaterEqual(rsi["buyBand"], 30)
+            self.assertLessEqual(rsi["crossbackThreshold"], 0.65)
+            self.assertGreaterEqual(repair["exit"]["timeStopBars"]["M15"], 6)
+            self.assertTrue(validate_strategy_json(repair)["valid"])
+
     def test_history_sync_pulls_incremental_usdjpy_bars_from_mt5(self):
         class FakeMT5(types.SimpleNamespace):
             TIMEFRAME_M1 = "M1"

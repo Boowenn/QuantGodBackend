@@ -87,11 +87,23 @@ def _mutation_parent_sort_key(row: Dict[str, Any]) -> tuple:
         quality_penalty += 5
     if family == "BB_Triple" and direction == "SHORT" and quality_penalty:
         quality_penalty += 10
+    if family == "RSI_Reversal" and blocker in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH"} and max(sample_count, trade_count) < 24:
+        quality_penalty += 7
+    rsi_focus_penalty = 0 if _is_p4_10d_rsi_parent(family, blocker, sample_count, trade_count) else 8
     return (
+        rsi_focus_penalty,
         quality_penalty,
         int(_num(row.get("rank"), 9999)),
         -_num(row.get("fitness"), -999.0),
     )
+
+
+def _is_p4_10d_rsi_parent(family: str, blocker: str, sample_count: int, trade_count: int) -> bool:
+    if family != "RSI_Reversal":
+        return False
+    if blocker not in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH", "WALK_FORWARD_UNSTABLE", "WALK_FORWARD_INSUFFICIENT"}:
+        return False
+    return max(sample_count, trade_count) >= 8
 
 
 def build_population(generation_number: int, previous_elites: List[Dict[str, Any]] | None = None, runtime_dir: Path | None = None) -> List[Dict[str, Any]]:
