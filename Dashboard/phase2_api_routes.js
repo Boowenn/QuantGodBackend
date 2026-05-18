@@ -89,6 +89,8 @@ const CSV_ENDPOINTS = Object.freeze({
   '/api/polymarket/radar-worker-ledger': 'QuantGod_PolymarketRadarWorkerV2.csv',
 });
 
+const SECONDARY_SCOPE_CSV_ENDPOINTS = new Set(['/api/trades/journal', '/api/trades/close-history']);
+
 const NOTIFY_ENDPOINTS = new Set([
   '/api/notify/config',
   '/api/notify/history',
@@ -166,6 +168,35 @@ function safeBaseDirs(ctx = {}) {
   if (runtimeDir) dirs.unshift(runtimeDir);
   if (hfmFiles) dirs.unshift(hfmFiles);
   return [...new Set(dirs.filter(Boolean).map((dir) => path.resolve(dir)))];
+}
+
+function secondaryRuntimeDir(ctx = {}) {
+  const candidates = [
+    ctx.secondaryRuntimeDir,
+    process.env.QG_MT5_SECONDARY_FILES_DIR,
+    process.env.QG_MT5_SECONDARY_ROOT ? path.join(process.env.QG_MT5_SECONDARY_ROOT, 'MQL5', 'Files') : '',
+    process.env.QG_MT5_SECONDARY_WINE_PREFIX
+      ? path.join(process.env.QG_MT5_SECONDARY_WINE_PREFIX, 'drive_c', 'Program Files', 'MetaTrader 5', 'MQL5', 'Files')
+      : '',
+    path.join(
+      require('os').homedir(),
+      'Library',
+      'Application Support',
+      'net.metaquotes.wine.metatrader5-live16',
+      'drive_c',
+      'Program Files',
+      'MetaTrader 5',
+      'MQL5',
+      'Files',
+    ),
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || '';
+}
+
+function csvScope(searchParams) {
+  const scope = String(searchParams.get('scope') || searchParams.get('accountScope') || 'primary').trim().toLowerCase();
+  if (scope === 'secondary' || scope === 'live16') return 'secondary';
+  return 'primary';
 }
 
 function resolveRuntimeFile(fileName, ctx = {}) {
@@ -383,13 +414,24 @@ function handleJsonEndpoint(req, res, ctx, endpoint, fileName) {
 }
 
 function handleCsvEndpoint(req, res, ctx, endpoint, fileName) {
-  const resolved = resolveRuntimeFile(fileName, ctx);
+  const url = new URL(req.url || '/', 'http://127.0.0.1');
+  const scope = csvScope(url.searchParams);
+  if (scope === 'secondary' && !SECONDARY_SCOPE_CSV_ENDPOINTS.has(endpoint)) {
+    sendError(res, 400, endpoint, 'secondary_scope_not_supported_for_endpoint', { scope });
+    return true;
+  }
+  const secondaryDir = scope === 'secondary' ? secondaryRuntimeDir(ctx) : '';
+  const scopedCtx = scope === 'secondary' ? { ...ctx, defaultRuntimeDir: secondaryDir, runtimeDir: secondaryDir } : ctx;
+  if (scope === 'secondary' && !secondaryDir) {
+    sendError(res, 404, endpoint, 'secondary_runtime_dir_not_found', { scope, fileName: path.basename(fileName) });
+    return true;
+  }
+  const resolved = resolveRuntimeFile(fileName, scopedCtx);
   if (!resolved.stat) {
-    sendError(res, 404, endpoint, 'file_not_found', { fileName: path.basename(fileName), rows: [] });
+    sendError(res, 404, endpoint, 'file_not_found', { scope, fileName: path.basename(fileName), rows: [] });
     return true;
   }
   try {
-    const url = new URL(req.url || '/', 'http://127.0.0.1');
     const csvRead = readCsvTextForRequest(resolved.filePath, resolved.stat, url.searchParams);
     const parsed = parseCsv(csvRead.text);
     const rows = filterRows(parsed.rows, url.searchParams);
@@ -408,6 +450,7 @@ function handleCsvEndpoint(req, res, ctx, endpoint, fileName) {
         resolved.filePath,
         resolved.stat,
         'csv',
+        { scope },
       ),
     );
   } catch (error) {

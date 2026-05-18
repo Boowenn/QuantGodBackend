@@ -117,6 +117,39 @@ test('CSV endpoint filters by symbol and limit', async () => {
   }
 });
 
+test('CSV trade endpoints can read secondary MT5 runtime by scope', async () => {
+  const primaryDir = await mkdtemp(path.join(tmpdir(), 'qg-phase2-primary-'));
+  const secondaryDir = await mkdtemp(path.join(tmpdir(), 'qg-phase2-secondary-'));
+  try {
+    await writeFile(
+      path.join(primaryDir, 'QuantGod_TradeJournal.csv'),
+      'EventTime,Symbol,AccountLogin\n2026-05-18 10:00:00,USDJPYc,186054398\n',
+      'utf8',
+    );
+    await writeFile(
+      path.join(secondaryDir, 'QuantGod_TradeJournal.csv'),
+      'EventTime,Symbol,AccountLogin\n2026-05-18 10:01:00,USDJPY,198135388\n',
+      'utf8',
+    );
+
+    const res = await invoke('/api/trades/journal?scope=secondary&limit=10', {
+      defaultRuntimeDir: primaryDir,
+      secondaryRuntimeDir: secondaryDir,
+      repoRoot: primaryDir,
+      rootDir: primaryDir,
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.scope, 'secondary');
+    assert.equal(res.body.data.returnedRows, 1);
+    assert.equal(res.body.data.rows[0].AccountLogin, '198135388');
+    assert.equal(res.body.source.filePath, path.join(secondaryDir, 'QuantGod_TradeJournal.csv'));
+  } finally {
+    await rm(primaryDir, { recursive: true, force: true });
+    await rm(secondaryDir, { recursive: true, force: true });
+  }
+});
+
 test('CSV endpoint uses partial tail read for large limited ledgers', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'qg-phase2-csv-tail-'));
   try {
