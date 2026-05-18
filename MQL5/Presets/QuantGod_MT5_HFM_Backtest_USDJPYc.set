@@ -94,6 +94,7 @@ PilotATRMulitplierSL=2.0
 PilotRewardRatio=1.5
 PilotLotSize=0.01
 PilotMaxSpreadPips=2.0
+ShadowResearchMaxSpreadPips=3.0
 PilotMaxTotalPositions=1
 PilotMaxPositionsPerSymbol=1
 PilotBlockManualPerSymbol=false

@@ -109,6 +109,7 @@ input double PilotATRMulitplierSL     = 2.0;
 input double PilotRewardRatio         = 1.5;
 input double PilotLotSize             = 0.01;
 input double PilotMaxSpreadPips       = 2.0;
+input double ShadowResearchMaxSpreadPips = 3.0;
 input int    PilotMaxTotalPositions   = 2;
 input int    PilotMaxPositionsPerSymbol = 2;
 input bool   PilotRequireStrategyCommentForManagedPosition = true;
@@ -1579,6 +1580,13 @@ bool IsUsdJpyShadowResearchRoute(string strategyKey)
            strategyKey == "USDJPY_H4_TREND_PULLBACK");
 }
 
+double EffectiveShadowResearchMaxSpreadPips()
+{
+   if(ShadowResearchMaxSpreadPips <= 0.0)
+      return PilotMaxSpreadPips;
+   return MathMax(PilotMaxSpreadPips, ShadowResearchMaxSpreadPips);
+}
+
 bool IsUsdJpyShadowResearchRouteEnabled(string strategyKey)
 {
    if(strategyKey == "USDJPY_TOKYO_RANGE_BREAKOUT")
@@ -2657,7 +2665,7 @@ void AppendShadowCandidateRoutesForBar(string symbol, int symbolIndex, datetime 
    if(SymbolInfoTick(symbol, routeTick) && routeTick.bid > 0.0 && routeTick.ask > 0.0)
    {
       routeSpreadPips = CalcSpreadPips(symbol, routeTick.bid, routeTick.ask);
-      lowSpreadForResearch = (routeSpreadPips <= PilotMaxSpreadPips);
+      lowSpreadForResearch = (routeSpreadPips <= EffectiveShadowResearchMaxSpreadPips());
    }
 
    AppendUsdJpyTokyoBreakoutShadowRoute(symbol, eventBarTime, close1, open1, atr1, pip, routeSpreadPips, lowSpreadForResearch);
@@ -6174,7 +6182,13 @@ string BuildStrategyJsonEAShadowEvaluationJson()
    double bid = tickOk ? tick.bid : 0.0;
    double ask = tickOk ? tick.ask : 0.0;
    double spreadPips = tickOk ? CalcSpreadPips(symbol, bid, ask) : 0.0;
-   bool spreadAllowed = (tickOk && spreadPips <= PilotMaxSpreadPips);
+   bool strategyJsonShadowResearch = IsUsdJpyShadowResearchRoute(strategyFamily);
+   double liveMaxSpreadPips = PilotMaxSpreadPips;
+   double shadowResearchMaxSpreadPips = EffectiveShadowResearchMaxSpreadPips();
+   double evaluationMaxSpreadPips = strategyJsonShadowResearch ? shadowResearchMaxSpreadPips : liveMaxSpreadPips;
+   bool liveSpreadAllowed = (tickOk && spreadPips <= liveMaxSpreadPips);
+   bool shadowResearchSpreadAllowed = (tickOk && spreadPips <= shadowResearchMaxSpreadPips);
+   bool spreadAllowed = (tickOk && spreadPips <= evaluationMaxSpreadPips);
    bool sessionOpen = IsPilotSessionOpen();
    string newsReason = "";
    bool newsBlocked = PilotNewsBlocksSymbol(symbol, newsReason);
@@ -6911,8 +6925,13 @@ string BuildStrategyJsonEAShadowEvaluationJson()
    json += "\"hardGuardsPass\":" + JsonBool(hardGuardsPass) + ",";
    json += "\"sessionOpen\":" + JsonBool(sessionOpen) + ",";
    json += "\"spreadAllowed\":" + JsonBool(spreadAllowed) + ",";
+   json += "\"liveSpreadAllowed\":" + JsonBool(liveSpreadAllowed) + ",";
+   json += "\"shadowResearchSpreadAllowed\":" + JsonBool(shadowResearchSpreadAllowed) + ",";
    json += "\"spreadPips\":" + FormatNumber(spreadPips, 2) + ",";
-   json += "\"maxSpreadPips\":" + FormatNumber(PilotMaxSpreadPips, 2) + ",";
+   json += "\"maxSpreadPips\":" + FormatNumber(evaluationMaxSpreadPips, 2) + ",";
+   json += "\"liveMaxSpreadPips\":" + FormatNumber(liveMaxSpreadPips, 2) + ",";
+   json += "\"shadowResearchMaxSpreadPips\":" + FormatNumber(shadowResearchMaxSpreadPips, 2) + ",";
+   json += "\"spreadGateMode\":\"" + (strategyJsonShadowResearch ? "SHADOW_RESEARCH" : "LIVE_PILOT") + "\",";
    json += "\"newsBlocked\":" + JsonBool(newsBlocked) + ",";
    json += "\"newsReason\":\"" + JsonEscape(newsReason) + "\",";
    json += "\"contractParameters\":{";
@@ -8759,6 +8778,7 @@ string BuildUsdJpyRsiEntryDiagnosticsJson()
    json += "\"PilotRsiCrossbackThreshold\": " + FormatNumber(crossbackThreshold, 2) + ", ";
    json += "\"PilotRsiBandTolerancePct\": " + FormatNumber(PilotRsiBandTolerancePct, 4) + ", ";
    json += "\"PilotMaxSpreadPips\": " + FormatNumber(PilotMaxSpreadPips, 1) + ", ";
+   json += "\"ShadowResearchMaxSpreadPips\": " + FormatNumber(ShadowResearchMaxSpreadPips, 1) + ", ";
    json += "\"PilotRestrictSession\": " + JsonBool(PilotRestrictSession) + ", ";
    json += "\"PilotSessionStartHour\": " + IntegerToString(PilotSessionStartHour) + ", ";
    json += "\"PilotSessionEndHour\": " + IntegerToString(PilotSessionEndHour) + "}, ";

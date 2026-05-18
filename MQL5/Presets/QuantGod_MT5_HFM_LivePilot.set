@@ -97,6 +97,7 @@ PilotATRMulitplierSL=2.0
 PilotRewardRatio=1.5
 PilotLotSize=0.01
 PilotMaxSpreadPips=2.0
+ShadowResearchMaxSpreadPips=3.0
 PilotMaxTotalPositions=2
 PilotMaxPositionsPerSymbol=2
 PilotRequireStrategyCommentForManagedPosition=true

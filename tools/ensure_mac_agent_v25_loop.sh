@@ -43,7 +43,7 @@ export QG_PRODUCTION_BURN_IN_MAX_STALE_MINUTES="${QG_PRODUCTION_BURN_IN_MAX_STAL
 
 PYTHON_BIN="${QG_PYTHON_BIN:-python3}"
 SCREEN_NAME="${QG_AGENT_V25_SCREEN:-quantgod-agent-v25}"
-INTERVAL_SECONDS="${QG_AGENT_V25_INTERVAL_SECONDS:-300}"
+INTERVAL_SECONDS="${QG_AGENT_V25_INTERVAL_SECONDS:-60}"
 STALE_SECONDS="${QG_AGENT_V25_STALE_SECONDS:-$((INTERVAL_SECONDS * 4))}"
 if [[ "$STALE_SECONDS" -lt 900 ]]; then
   STALE_SECONDS=900
@@ -80,6 +80,8 @@ export QG_MT5_FILES_DIR="${QG_MT5_FILES_DIR:-$RUNTIME_DIR}"
 
 STATUS_FILE="$RUNTIME_DIR/agent/QuantGod_AgentV25LoopStatus.json"
 SUPERVISOR_FILE="$RUNTIME_DIR/agent/QuantGod_AgentV25SupervisorStatus.json"
+LOCK_DIR="${QG_AGENT_V25_LOCK_DIR:-$RUNTIME_DIR/agent/QuantGod_AgentV25Loop.lock}"
+MAINTENANCE_LOCK_DIR="${QG_AGENT_V25_MAINTENANCE_LOCK_DIR:-$RUNTIME_DIR/agent/QuantGod_AgentV25Maintenance.lock}"
 LOG_FILE="$REPO_ROOT/runtime/agent_v25_screen.log"
 RUNTIME_LOG_ROOT="${QG_RUNTIME_LOG_ROOT:-$REPO_ROOT/runtime}"
 
@@ -98,6 +100,25 @@ refresh_agent_health_and_burn_in() {
     --burn-in-min-interval-seconds "$QG_PRODUCTION_BURN_IN_INTERVAL_SECONDS" >/dev/null 2>&1 || true
 }
 
+refresh_agent_health_and_burn_in_async() {
+  local holder=""
+  mkdir -p "$(dirname "$MAINTENANCE_LOCK_DIR")"
+  if ! mkdir "$MAINTENANCE_LOCK_DIR" 2>/dev/null; then
+    holder="$(cat "$MAINTENANCE_LOCK_DIR/pid" 2>/dev/null || true)"
+    if [[ "$holder" =~ ^[0-9]+$ ]] && kill -0 "$holder" >/dev/null 2>&1; then
+      return 0
+    fi
+    rm -rf "$MAINTENANCE_LOCK_DIR"
+    mkdir "$MAINTENANCE_LOCK_DIR" 2>/dev/null || return 0
+  fi
+  (
+    printf '%s\n' "${BASHPID:-$$}" > "$MAINTENANCE_LOCK_DIR/pid"
+    date -u '+%Y-%m-%dT%H:%M:%SZ' > "$MAINTENANCE_LOCK_DIR/acquired_at"
+    refresh_agent_health_and_burn_in
+    rm -rf "$MAINTENANCE_LOCK_DIR"
+  ) &
+}
+
 screen_running() {
   command -v screen >/dev/null 2>&1 || return 1
   screen -ls 2>/dev/null | grep -Eq "[[:space:]][0-9]+\\.${SCREEN_NAME}[[:space:]]"
@@ -108,6 +129,21 @@ matching_screen_sessions() {
   { screen -ls 2>/dev/null || true; } | awk -v name="$SCREEN_NAME" '
     $1 ~ "^[0-9]+\\." name "$" { print $1 }
   '
+}
+
+stop_orphan_lock_holder() {
+  local holder=""
+  local command=""
+  holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  [[ "$holder" =~ ^[0-9]+$ ]] || return 0
+  command="$(ps -p "$holder" -o command= 2>/dev/null || true)"
+  [[ "$command" == *"run_mac_agent_v25_loop.sh"* ]] || return 0
+  kill "$holder" >/dev/null 2>&1 || true
+  sleep 1
+  if kill -0 "$holder" >/dev/null 2>&1; then
+    kill -9 "$holder" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$LOCK_DIR"
 }
 
 status_age_seconds() {
@@ -191,8 +227,10 @@ restart_loop() {
       [[ -n "$session" ]] || continue
       screen -S "$session" -X quit >/dev/null 2>&1 || true
     done < <(matching_screen_sessions)
+    stop_orphan_lock_holder
     screen -dmS "$SCREEN_NAME" /bin/zsh -lc "cd '$REPO_ROOT' && exec bash tools/run_mac_agent_v25_loop.sh --loop >> '$LOG_FILE' 2>&1"
   else
+    stop_orphan_lock_holder
     /bin/zsh -lc "cd '$REPO_ROOT' && exec bash tools/run_mac_agent_v25_loop.sh --loop >> '$LOG_FILE' 2>&1" &
   fi
 }
@@ -200,12 +238,12 @@ restart_loop() {
 ensure_once() {
   local age reason session_count
   maintain_runtime_logs
-  refresh_agent_health_and_burn_in
   age="$(status_age_seconds)"
   session_count="$(matching_screen_sessions | wc -l | tr -d ' ')"
   if [[ "$session_count" == "1" && "$age" -le "$STALE_SECONDS" ]]; then
     write_supervisor_status "NOOP" "Agent v2.5 后台循环在线，心跳新鲜。" "$age"
     echo "Agent v2.5 loop is healthy: screen=$SCREEN_NAME heartbeatAge=${age}s runtime=$RUNTIME_DIR"
+    refresh_agent_health_and_burn_in_async
     return 0
   fi
 
@@ -219,6 +257,7 @@ ensure_once() {
   restart_loop
   write_supervisor_status "RESTARTED" "$reason" "$age"
   echo "$reason screen=$SCREEN_NAME previousHeartbeatAge=${age}s runtime=$RUNTIME_DIR"
+  refresh_agent_health_and_burn_in_async
 }
 
 if [[ "$MODE" == "--loop" ]]; then

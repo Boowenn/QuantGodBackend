@@ -118,7 +118,7 @@ start_screen() {
   mkdir -p "$(dirname "$log_file")"
   : > "$log_file"
   if command -v screen >/dev/null 2>&1; then
-    screen -S "$name" -X quit >/dev/null 2>&1 || true
+    quit_screen "$name"
     screen -dmS "$name" /bin/zsh -lc "$command >> '$log_file' 2>&1"
     echo "Started screen: $name"
   else
@@ -129,7 +129,12 @@ start_screen() {
 
 quit_screen() {
   local name="$1"
+  local session
   command -v screen >/dev/null 2>&1 || return 0
+  while IFS= read -r session; do
+    [[ -n "$session" ]] || continue
+    screen -S "$session" -X quit >/dev/null 2>&1 || true
+  done < <({ screen -ls 2>/dev/null || true; } | awk -v name="$name" '$1 ~ "^[0-9]+\\." name "$" { print $1 }')
   screen -S "$name" -X quit >/dev/null 2>&1 || true
 }
 
