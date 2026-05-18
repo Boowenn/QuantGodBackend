@@ -11,7 +11,7 @@ from tools.strategy_json.schema import ALLOWED_STRATEGY_FAMILIES
 from tools.strategy_ga.fitness import evidence_metrics, score_seed
 from tools.strategy_ga.mutation import mutate_seed
 from tools.strategy_ga.population import build_population
-from tools.strategy_ga.seed_generator import exploration_seed_pool
+from tools.strategy_ga.seed_generator import exploration_seed_pool, quality_repair_seed_pool
 from tools.strategy_json.fingerprint import strategy_fingerprint
 from tools.strategy_json.schema import base_strategy_seed
 from tools.strategy_json.validator import validate_strategy_json
@@ -357,6 +357,43 @@ class USDJPYStrategyBacktestTests(unittest.TestCase):
             self.assertIsNotNone(mutation)
             self.assertEqual(mutation["parentSeedId"], parent["seedId"])
             self.assertEqual(mutation["explorationMode"], "NO_ELITE_EXPAND_SEARCH")
+
+    def test_ga_quality_repair_targets_blocked_promising_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            ga_dir = runtime_dir / "ga"
+            ga_dir.mkdir(parents=True)
+            parent = base_strategy_seed("PARENT-MAE", family="SR_Breakout", direction="LONG")
+            parent["risk"]["riskPips"] = 10.0
+            parent["exit"]["timeStopBars"]["H1"] = 6
+            row = {
+                "generation": 5,
+                "rank": 1,
+                "fitness": 1.2,
+                "blockerCode": "MAX_ADVERSE_TOO_HIGH",
+                "strategyJson": parent,
+                "fitnessBreakdown": {
+                    "strategyBacktest": {"netR": 5.0, "tradeCount": 12},
+                    "walkForward": {"summary": {"stabilityScore": 0.4}},
+                },
+            }
+            (ga_dir / "QuantGod_GACandidateRuns.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            repairs = quality_repair_seed_pool(runtime_dir, generation_number=6, limit=4)
+            population = build_population(6, [], runtime_dir=runtime_dir)
+            repair = repairs[0]
+
+            self.assertTrue(repairs)
+            self.assertEqual(repair["source"], "QUALITY_REPAIR")
+            self.assertEqual(repair["parentSeedId"], parent["seedId"])
+            self.assertEqual(repair["repairTargetBlocker"], "MAX_ADVERSE_TOO_HIGH")
+            self.assertIn("MAX_ADVERSE_REPAIR", repair["qualityProfile"])
+            self.assertGreaterEqual(repair["risk"]["riskPips"], parent["risk"]["riskPips"])
+            self.assertLessEqual(repair["exit"]["timeStopBars"]["H1"], parent["exit"]["timeStopBars"]["H1"])
+            self.assertEqual(repair["risk"]["stage"], "SHADOW")
+            self.assertLessEqual(repair["risk"]["maxLot"], 2.0)
+            self.assertTrue(validate_strategy_json(repair)["valid"])
+            self.assertTrue(any(seed.get("source") == "QUALITY_REPAIR" for seed in population))
 
     def test_history_sync_pulls_incremental_usdjpy_bars_from_mt5(self):
         class FakeMT5(types.SimpleNamespace):

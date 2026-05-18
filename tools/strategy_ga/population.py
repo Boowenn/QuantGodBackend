@@ -8,7 +8,12 @@ from typing import Any, Dict, List
 from .crossover import crossover_seed
 from .mutation import mutate_seed
 from .schema import CANDIDATE_RUNS_FILE, DEFAULT_ELITE_COUNT, DEFAULT_POPULATION_SIZE, ga_dir
-from .seed_generator import case_memory_seed_pool, exploration_seed_pool, initial_seed_pool
+from .seed_generator import (
+    case_memory_seed_pool,
+    exploration_seed_pool,
+    initial_seed_pool,
+    quality_repair_seed_pool,
+)
 
 
 def population_size() -> int:
@@ -67,6 +72,12 @@ def build_population(generation_number: int, previous_elites: List[Dict[str, Any
             return (case_seeds + initial_seed_pool(size))[:size]
         population: List[Dict[str, Any]] = []
         population.extend(case_seeds[: max(1, size // 4)])
+        quality_seeds = (
+            quality_repair_seed_pool(runtime_dir, generation_number, limit=max(2, size // 2))
+            if runtime_dir is not None
+            else []
+        )
+        population.extend(quality_seeds[: max(0, size - len(population))])
         offset = 1
         for parent in _recent_rejected_seeds(runtime_dir, limit=max(2, size // 4)):
             if len(population) >= size:

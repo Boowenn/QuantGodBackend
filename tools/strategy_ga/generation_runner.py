@@ -240,6 +240,29 @@ def _walk_forward_stats(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _quality_repair_stats(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    repairs = [
+        row.get("strategyJson")
+        for row in candidates
+        if row.get("source") == "QUALITY_REPAIR" and isinstance(row.get("strategyJson"), dict)
+    ]
+    blocker_counts = Counter(str(seed.get("repairTargetBlocker") or "UNKNOWN") for seed in repairs)
+    profile_counts = Counter(str(seed.get("qualityProfile") or "UNKNOWN") for seed in repairs)
+    return {
+        "enabled": bool(repairs),
+        "candidateCount": len(repairs),
+        "targetBlockers": [
+            {"blockerCode": blocker, "count": count}
+            for blocker, count in blocker_counts.most_common()
+        ],
+        "profiles": [
+            {"qualityProfile": profile, "count": count}
+            for profile, count in profile_counts.most_common()
+        ],
+        "reasonZh": "P4-10 在 no-elite 状态下按 blocker 生成质量修复 seed，扩大可重复 elite 的搜索空间。",
+    }
+
+
 def run_generation(runtime_dir: Path, write: bool = True, force: bool = False) -> Dict[str, Any]:
     limiter = check_run_allowed(runtime_dir, force=force)
     if not limiter.get("allowed"):
@@ -250,7 +273,8 @@ def run_generation(runtime_dir: Path, write: bool = True, force: bool = False) -
         return status
     generation_number = _next_generation_number(runtime_dir)
     generation_id = f"GA-USDJPY-GEN-{generation_number:04d}"
-    seeds = build_population(generation_number, _existing_elites(runtime_dir), runtime_dir=runtime_dir)
+    previous_elites = _existing_elites(runtime_dir)
+    seeds = build_population(generation_number, previous_elites, runtime_dir=runtime_dir)
     candidates = _score_candidates(runtime_dir, generation_number, generation_id, seeds)
     signature = evidence_signature(runtime_dir)
     backtest_stats = _backtest_stats(candidates)
@@ -258,8 +282,10 @@ def run_generation(runtime_dir: Path, write: bool = True, force: bool = False) -
     elites = [row for row in candidates if row.get("status") == "ELITE_SELECTED"][: elite_count()]
     blocker_counts = Counter(str(row.get("blockerCode") or "PASSED") for row in candidates)
     best = candidates[0] if candidates else {}
+    source_counts = Counter(str(row.get("source") or "UNKNOWN") for row in candidates)
     exploration_count = sum(1 for row in candidates if str(row.get("source") or "").startswith("EXPLORATION"))
-    no_elite_exploration = generation_number > 1 and exploration_count > 0 and not _existing_elites(runtime_dir)
+    quality_repair_count = source_counts.get("QUALITY_REPAIR", 0)
+    no_elite_exploration = generation_number > 1 and not previous_elites and (exploration_count > 0 or quality_repair_count > 0)
     generation = {
         "schema": "quantgod.ga.generation.v1",
         "agentVersion": AGENT_VERSION,
@@ -279,14 +305,22 @@ def run_generation(runtime_dir: Path, write: bool = True, force: bool = False) -
         "blockedCount": sum(1 for row in candidates if row.get("blockerCode")),
         "mutationCount": sum(1 for row in candidates if row.get("source") in {"MUTATION", "EXPLORATION_MUTATION"}),
         "crossoverCount": sum(1 for row in candidates if row.get("source") in {"CROSSOVER", "EXPLORATION_CROSSOVER"}),
+        "qualityRepairCount": quality_repair_count,
         "explorationMode": "NO_ELITE_EXPAND_SEARCH" if no_elite_exploration else "ELITE_GUIDED",
         "explorationSeedCount": exploration_count,
         "explorationReasonZh": (
-            "上一代没有 elite，Agent 已自动扩大参数网格、Case Memory 和 rejected seed mutation 搜索空间。"
+            "上一代没有 elite，Agent 已扩大质量修复、参数网格、Case Memory 和 rejected seed mutation 搜索空间。"
             if no_elite_exploration
             else "存在 elite 时优先沿 elite lineage 做 mutation / crossover。"
         ),
         "caseMemorySeedCount": sum(1 for row in candidates if row.get("source") == "CASE_MEMORY"),
+        "searchExpansion": {
+            "schema": "quantgod.ga.search_expansion.v1",
+            "mode": "QUALITY_REPAIR_AND_GRID" if no_elite_exploration else "ELITE_GUIDED",
+            "sourceCounts": dict(source_counts),
+            "qualityRepair": _quality_repair_stats(candidates),
+            "reasonZh": "P4-10 目标是扩大搜索空间并提高候选质量，让后续 generation 有机会形成可重复 elite。",
+        },
         "strategyBacktest": backtest_stats,
         "walkForward": walk_forward_stats,
         "cache": _generation_cache_stats(runtime_dir, candidates, signature),
@@ -328,7 +362,7 @@ def run_generation(runtime_dir: Path, write: bool = True, force: bool = False) -
         "blockedCandidates": generation["blockedCount"],
         "eliteCount": len(elites),
         "nextAction": (
-            f"当前 0 个 elite；下一代继续扩大参数网格、Case Memory 和 rejected seed mutation 搜索"
+            f"当前 0 个 elite；下一代继续扩大质量修复、参数网格、Case Memory 和 rejected seed mutation 搜索"
             if not elites
             else f"基于 {len(elites)} 个 elite 生成第 {generation_number + 1} 代候选"
         ),

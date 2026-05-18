@@ -75,6 +75,8 @@ class StrategyJsonGATests(unittest.TestCase):
             self.assertTrue(result["candidates"])
             self.assertTrue(result["generation"]["strategyBacktest"]["required"])
             self.assertTrue(result["generation"]["walkForward"]["required"])
+            self.assertIn("qualityRepairCount", result["generation"])
+            self.assertEqual(result["generation"]["searchExpansion"]["schema"], "quantgod.ga.search_expansion.v1")
             self.assertEqual(
                 result["generation"]["strategyBacktest"]["scoredCount"],
                 len(result["candidates"]),

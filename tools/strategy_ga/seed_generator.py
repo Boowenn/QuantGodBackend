@@ -21,6 +21,30 @@ SUPPORTED_CASE_MEMORY_FAMILIES = {
     "USDJPY_H4_TREND_PULLBACK",
 }
 GOVERNANCE_ONLY_HINTS = {"verify_live_lane_strategy_lock"}
+QUALITY_REPAIR_BLOCKERS = {
+    "WALK_FORWARD_UNSTABLE",
+    "WALK_FORWARD_INSUFFICIENT",
+    "MAX_ADVERSE_TOO_HIGH",
+    "INSUFFICIENT_SAMPLES",
+    "OVERFIT_RISK_HIGH",
+    "FITNESS_NOT_POSITIVE",
+}
+DANGEROUS_REPAIR_BLOCKERS = {
+    "SAFETY_REJECTED",
+    "DUPLICATE_STRATEGY",
+    "HISTORY_PRODUCTION_NOT_READY",
+    "NON_USDJPY_REJECTED",
+}
+FAMILY_CONFIG_KEYS = {
+    "RSI_Reversal": "rsi",
+    "MA_Cross": "ma",
+    "BB_Triple": "bollinger",
+    "MACD_Divergence": "macd",
+    "SR_Breakout": "supportResistance",
+    "USDJPY_TOKYO_RANGE_BREAKOUT": "tokyoRange",
+    "USDJPY_NIGHT_REVERSION_SAFE": "nightReversion",
+    "USDJPY_H4_TREND_PULLBACK": "h4Pullback",
+}
 
 
 def initial_seed_pool(population_size: int = 16) -> List[Dict[str, Any]]:
@@ -205,6 +229,348 @@ def case_memory_seed_pool(runtime_dir: Path, limit: int = 6) -> List[Dict[str, A
         _apply_case_hint(seed, hint)
         seeds.append(seed)
     return seeds
+
+
+def quality_repair_seed_pool(runtime_dir: Path, generation_number: int, limit: int = 8) -> List[Dict[str, Any]]:
+    """Create blocker-aware search seeds from the best rejected candidates.
+
+    P4-10 deliberately expands candidate quality instead of making more of the
+    same grid. Each repair keeps the Strategy JSON in shadow mode and targets
+    the blocker that stopped a promising parent.
+    """
+    if limit <= 0:
+        return []
+    rows = _quality_repair_candidate_rows(runtime_dir)
+    rows = rows[: max(1, min(len(rows), max(2, (limit + 1) // 2)))]
+    seeds: List[Dict[str, Any]] = []
+    offset = 1
+    max_profile_count = max((len(_repair_profiles_for_blocker(str(row.get("blockerCode") or ""))) for row in rows), default=0)
+    for profile_index in range(max_profile_count):
+        for row in rows:
+            profiles = _repair_profiles_for_blocker(str(row.get("blockerCode") or ""))
+            if profile_index >= len(profiles):
+                continue
+            seed = _build_quality_repair_seed(row, generation_number, offset, profiles[profile_index])
+            if not seed:
+                continue
+            seeds.append(seed)
+            offset += 1
+            if len(seeds) >= limit:
+                return seeds
+    return seeds
+
+
+def _quality_repair_candidate_rows(runtime_dir: Path) -> List[Dict[str, Any]]:
+    candidate_file = runtime_dir / "ga" / "QuantGod_GACandidateRuns.jsonl"
+    if not candidate_file.exists():
+        return []
+    rows: List[Dict[str, Any]] = []
+    for line in candidate_file.read_text(encoding="utf-8").splitlines()[-4096:]:
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        seed = row.get("strategyJson") if isinstance(row.get("strategyJson"), dict) else {}
+        blocker = str(row.get("blockerCode") or "")
+        if not seed or blocker in DANGEROUS_REPAIR_BLOCKERS:
+            continue
+        if blocker not in QUALITY_REPAIR_BLOCKERS and _num(row.get("fitness"), -99.0) < -15:
+            continue
+        rows.append(row)
+    best_by_parent: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        seed = row.get("strategyJson") if isinstance(row.get("strategyJson"), dict) else {}
+        parent_id = str(seed.get("seedId") or row.get("seedId") or "")
+        if not parent_id:
+            continue
+        current = best_by_parent.get(parent_id)
+        if current is None or _quality_repair_sort_key(row) > _quality_repair_sort_key(current):
+            best_by_parent[parent_id] = row
+    deduped = list(best_by_parent.values())
+    deduped.sort(key=_quality_repair_sort_key, reverse=True)
+    return _balanced_quality_repair_rows(deduped, limit=24)
+
+
+def _balanced_quality_repair_rows(rows: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    selected: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    blocker_priority = [
+        "WALK_FORWARD_UNSTABLE",
+        "MAX_ADVERSE_TOO_HIGH",
+        "INSUFFICIENT_SAMPLES",
+        "WALK_FORWARD_INSUFFICIENT",
+        "OVERFIT_RISK_HIGH",
+        "FITNESS_NOT_POSITIVE",
+    ]
+    for blocker in blocker_priority:
+        for row in rows:
+            if str(row.get("blockerCode") or "") != blocker:
+                continue
+            if _append_balanced_row(selected, seen, row, limit):
+                break
+    for row in rows:
+        if len(selected) >= limit:
+            break
+        _append_balanced_row(selected, seen, row, limit)
+    return selected
+
+
+def _append_balanced_row(
+    selected: List[Dict[str, Any]],
+    seen: set[str],
+    row: Dict[str, Any],
+    limit: int,
+) -> bool:
+    if len(selected) >= limit:
+        return False
+    seed = row.get("strategyJson") if isinstance(row.get("strategyJson"), dict) else {}
+    identity = str(seed.get("seedId") or row.get("seedId") or "")
+    if not identity or identity in seen:
+        return False
+    seen.add(identity)
+    selected.append(row)
+    return True
+
+
+def _build_quality_repair_seed(
+    row: Dict[str, Any],
+    generation_number: int,
+    offset: int,
+    profile: str,
+) -> Dict[str, Any]:
+    parent = row.get("strategyJson") if isinstance(row.get("strategyJson"), dict) else {}
+    if not parent:
+        return {}
+    blocker = str(row.get("blockerCode") or "FITNESS_NOT_POSITIVE")
+    family = str(parent.get("strategyFamily") or "RSI_Reversal")
+    direction = str(parent.get("direction") or "LONG").upper()
+    seed = clone_seed(parent, f"GA-USDJPY-G{generation_number:04d}-QR{offset:04d}", "QUALITY_REPAIR")
+    seed["parentSeedId"] = parent.get("seedId") or row.get("seedId")
+    seed["repairTargetBlocker"] = blocker
+    seed["qualityProfile"] = profile
+    seed["parentFitness"] = row.get("fitness")
+    seed["explorationMode"] = "NO_ELITE_QUALITY_REPAIR"
+    seed["explorationReasonZh"] = "上一代没有可晋级 elite，Agent 按 blocker 做质量修复搜索。"
+    seed["repairReasonZh"] = _repair_reason_zh(blocker, profile)
+    seed["strategyId"] = (
+        f"USDJPY_{_strategy_id_token(family)}_{direction}_QUALITY_REPAIR_"
+        f"{generation_number:03d}_{offset:03d}"
+    )
+    _apply_quality_profile(seed, blocker, profile, offset)
+    _enforce_shadow_safety(seed)
+    return seed
+
+
+def _repair_profiles_for_blocker(blocker: str) -> List[str]:
+    if blocker == "MAX_ADVERSE_TOO_HIGH":
+        return [
+            "MAX_ADVERSE_REPAIR",
+            "MAX_ADVERSE_REPAIR_TIGHT_ENTRY",
+            "MAX_ADVERSE_REPAIR_WIDER_STOP",
+        ]
+    if blocker in {"INSUFFICIENT_SAMPLES", "WALK_FORWARD_INSUFFICIENT"}:
+        return [
+            "LOW_SAMPLE_EXPANDER",
+            "LOW_SAMPLE_EXPANDER_M15",
+            "LOW_SAMPLE_EXPANDER_FAST",
+        ]
+    if blocker in {"WALK_FORWARD_UNSTABLE", "OVERFIT_RISK_HIGH"}:
+        return [
+            "WALK_FORWARD_STABILIZER",
+            "WALK_FORWARD_STABILIZER_FAST_EXIT",
+            "WALK_FORWARD_STABILIZER_TIGHT_ENTRY",
+        ]
+    return ["QUALITY_STABILIZER", "QUALITY_TIGHT_ENTRY"]
+
+
+def _apply_quality_profile(seed: Dict[str, Any], blocker: str, profile: str, offset: int) -> None:
+    exit_cfg = seed.setdefault("exit", {})
+    risk = seed.setdefault("risk", {})
+    if profile.startswith("LOW_SAMPLE"):
+        _set_exit(seed, hold_h1=[4, 6, 8][offset % 3], hold_m15=[6, 8, 10][offset % 3])
+        exit_cfg["breakevenDelayR"] = [0.8, 1.0, 1.2][offset % 3]
+        exit_cfg["trailStartR"] = [1.1, 1.5, 2.0][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.5, 0.6, 0.7][offset % 3]
+        risk["riskPips"] = max(12.5, min(22.5, _num(risk.get("riskPips"), 12.5) + (offset % 3) * 2.5))
+        risk["opportunityLotMultiplier"] = max(0.2, min(0.5, _num(risk.get("opportunityLotMultiplier"), 0.35) + 0.05))
+        _relax_family_entry(seed, offset)
+        _set_family_timeframe(seed, "M15" if profile.endswith("M15") else "M5")
+        return
+    if profile.startswith("MAX_ADVERSE"):
+        _set_exit(seed, hold_h1=[2, 3, 3][offset % 3], hold_m15=[3, 4, 5][offset % 3])
+        exit_cfg["breakevenDelayR"] = [0.3, 0.5, 0.7][offset % 3]
+        exit_cfg["trailStartR"] = [0.6, 0.8, 1.0][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.35, 0.42, 0.5][offset % 3]
+        risk["riskPips"] = max(_num(risk.get("riskPips"), 10.0), [20.0, 25.0, 30.0][offset % 3])
+        risk["opportunityLotMultiplier"] = min(0.25, _num(risk.get("opportunityLotMultiplier"), 0.35))
+        _tighten_family_entry(seed, offset, strong=True)
+        return
+    _set_exit(seed, hold_h1=[2, 3, 4][offset % 3], hold_m15=[3, 4, 6][offset % 3])
+    exit_cfg["breakevenDelayR"] = [0.4, 0.6, 0.8][offset % 3]
+    exit_cfg["trailStartR"] = [0.8, 1.0, 1.2][offset % 3]
+    exit_cfg["mfeGivebackPct"] = [0.42, 0.5, 0.58][offset % 3]
+    risk["riskPips"] = max(_num(risk.get("riskPips"), 10.0), [15.0, 20.0, 25.0][offset % 3])
+    risk["opportunityLotMultiplier"] = min(0.35, _num(risk.get("opportunityLotMultiplier"), 0.35))
+    _tighten_family_entry(seed, offset, strong=profile.endswith("TIGHT_ENTRY") or blocker == "OVERFIT_RISK_HIGH")
+
+
+def _set_exit(seed: Dict[str, Any], hold_h1: int, hold_m15: int) -> None:
+    exit_cfg = seed.setdefault("exit", {})
+    time_stop = exit_cfg.setdefault("timeStopBars", {})
+    time_stop["H1"] = max(1, min(24, int(hold_h1)))
+    time_stop["M15"] = max(1, min(48, int(hold_m15)))
+
+
+def _tighten_family_entry(seed: Dict[str, Any], offset: int, strong: bool = False) -> None:
+    indicators = seed.setdefault("indicators", {})
+    step = 2 if strong else 1
+    rsi = indicators.setdefault("rsi", {})
+    rsi["buyBand"] = max(20, min(45, _num(rsi.get("buyBand"), 34.0) - step))
+    rsi["crossbackThreshold"] = round(max(0.1, min(3.0, _num(rsi.get("crossbackThreshold"), 0.8) + 0.2 * step)), 2)
+    bollinger = indicators.setdefault("bollinger", {})
+    bollinger["deviations"] = round(max(0.5, min(4.0, _num(bollinger.get("deviations"), 2.0) + 0.15 * step)), 2)
+    bollinger["reclaimBufferPips"] = round(max(0.0, min(30.0, _num(bollinger.get("reclaimBufferPips"), 0.0) + step)), 2)
+    macd = indicators.setdefault("macd", {})
+    macd["minHistogramAbs"] = round(max(0.0, min(1.0, _num(macd.get("minHistogramAbs"), 0.0) + 0.0005 * step)), 4)
+    support = indicators.setdefault("supportResistance", {})
+    support["lookbackBars"] = max(4, min(240, int(_num(support.get("lookbackBars"), 24) + 6 * step)))
+    support["breakoutBufferPips"] = round(max(0.0, min(50.0, _num(support.get("breakoutBufferPips"), 0.0) + step)), 2)
+    _tighten_time_window(indicators.setdefault("tokyoRange", {}), offset)
+    _tighten_night_reversion(indicators.setdefault("nightReversion", {}), step)
+    _tighten_h4_pullback(indicators.setdefault("h4Pullback", {}), seed.get("direction"), step)
+
+
+def _relax_family_entry(seed: Dict[str, Any], offset: int) -> None:
+    indicators = seed.setdefault("indicators", {})
+    rsi = indicators.setdefault("rsi", {})
+    rsi["buyBand"] = max(20, min(45, _num(rsi.get("buyBand"), 34.0) + 2))
+    rsi["crossbackThreshold"] = round(max(0.0, min(3.0, _num(rsi.get("crossbackThreshold"), 0.8) - 0.25)), 2)
+    ma = indicators.setdefault("ma", {})
+    _set_ma_periods(ma, fast=max(3, int(_num(ma.get("fastPeriod"), 9) - 2)), slow=max(8, int(_num(ma.get("slowPeriod"), 21) - 6)))
+    bollinger = indicators.setdefault("bollinger", {})
+    bollinger["deviations"] = round(max(0.8, min(4.0, _num(bollinger.get("deviations"), 2.0) - 0.2)), 2)
+    bollinger["reclaimBufferPips"] = round(max(0.0, _num(bollinger.get("reclaimBufferPips"), 0.0) - 1.0), 2)
+    macd = indicators.setdefault("macd", {})
+    macd["minHistogramAbs"] = round(max(0.0, _num(macd.get("minHistogramAbs"), 0.0) - 0.0005), 4)
+    support = indicators.setdefault("supportResistance", {})
+    support["lookbackBars"] = max(4, int(_num(support.get("lookbackBars"), 24) - 8))
+    support["breakoutBufferPips"] = round(max(0.0, _num(support.get("breakoutBufferPips"), 0.0) - 1.0), 2)
+    _widen_tokyo_window(indicators.setdefault("tokyoRange", {}), offset)
+    _relax_night_reversion(indicators.setdefault("nightReversion", {}))
+    _relax_h4_pullback(indicators.setdefault("h4Pullback", {}), seed.get("direction"))
+
+
+def _set_family_timeframe(seed: Dict[str, Any], timeframe: str) -> None:
+    family = str(seed.get("strategyFamily") or "RSI_Reversal")
+    if family == "USDJPY_H4_TREND_PULLBACK":
+        timeframe = "H4"
+    indicators = seed.setdefault("indicators", {})
+    cfg_key = FAMILY_CONFIG_KEYS.get(family, "rsi")
+    indicators.setdefault(cfg_key, {})["timeframe"] = timeframe
+
+
+def _set_ma_periods(ma: Dict[str, Any], fast: int, slow: int) -> None:
+    ma["fastPeriod"] = max(2, min(80, int(fast)))
+    ma["slowPeriod"] = max(ma["fastPeriod"] + 1, min(240, int(slow)))
+
+
+def _tighten_time_window(tokyo: Dict[str, Any], offset: int) -> None:
+    start = max(1, min(6, int(_num(tokyo.get("tradeStartHourUtc"), 3)) + (offset % 2)))
+    tokyo["tradeStartHourUtc"] = start
+    tokyo["tradeEndHourUtc"] = max(start, min(8, start + 2))
+    tokyo["rangeStartHourUtc"] = max(0, start - 3)
+    tokyo["rangeEndHourUtc"] = max(0, start - 1)
+    tokyo["lookbackBars"] = max(4, min(96, int(_num(tokyo.get("lookbackBars"), 8) + 2)))
+    tokyo["bufferPips"] = round(max(0.0, min(50.0, _num(tokyo.get("bufferPips"), 0.0) + 1.0)), 2)
+
+
+def _widen_tokyo_window(tokyo: Dict[str, Any], offset: int) -> None:
+    start = max(0, min(5, int(_num(tokyo.get("tradeStartHourUtc"), 3)) - 1))
+    tokyo["tradeStartHourUtc"] = start
+    tokyo["tradeEndHourUtc"] = min(23, start + 4 + (offset % 2))
+    tokyo["rangeStartHourUtc"] = max(0, start - 4)
+    tokyo["rangeEndHourUtc"] = max(0, start - 1)
+    tokyo["lookbackBars"] = max(3, int(_num(tokyo.get("lookbackBars"), 8) - 2))
+    tokyo["bufferPips"] = round(max(0.0, _num(tokyo.get("bufferPips"), 0.0) - 0.5), 2)
+
+
+def _tighten_night_reversion(night: Dict[str, Any], step: int) -> None:
+    night["deviations"] = round(max(0.5, min(4.0, _num(night.get("deviations"), 1.8) + 0.15 * step)), 2)
+    night["entryBufferPips"] = round(max(0.0, min(30.0, _num(night.get("entryBufferPips"), 0.0) + 0.5 * step)), 2)
+    night["bollingerPeriod"] = max(5, min(120, int(_num(night.get("bollingerPeriod"), 20) + 2 * step)))
+
+
+def _relax_night_reversion(night: Dict[str, Any]) -> None:
+    night["deviations"] = round(max(0.5, min(4.0, _num(night.get("deviations"), 1.8) - 0.2)), 2)
+    night["entryBufferPips"] = round(max(0.0, _num(night.get("entryBufferPips"), 0.0) - 0.5), 2)
+    night["bollingerPeriod"] = max(5, int(_num(night.get("bollingerPeriod"), 20) - 3))
+
+
+def _tighten_h4_pullback(h4: Dict[str, Any], direction: Any, step: int) -> None:
+    if str(direction or "LONG").upper() == "SHORT":
+        h4["shortRsiMax"] = round(max(35.0, _num(h4.get("shortRsiMax"), 62.0) - 2 * step), 1)
+    else:
+        h4["longRsiMin"] = round(min(65.0, _num(h4.get("longRsiMin"), 38.0) + 2 * step), 1)
+
+
+def _relax_h4_pullback(h4: Dict[str, Any], direction: Any) -> None:
+    if str(direction or "LONG").upper() == "SHORT":
+        h4["shortRsiMax"] = round(min(95.0, _num(h4.get("shortRsiMax"), 62.0) + 3), 1)
+    else:
+        h4["longRsiMin"] = round(max(5.0, _num(h4.get("longRsiMin"), 38.0) - 3), 1)
+
+
+def _enforce_shadow_safety(seed: Dict[str, Any]) -> None:
+    risk = seed.setdefault("risk", {})
+    risk["stage"] = "SHADOW"
+    risk["maxLot"] = min(2.0, _num(risk.get("maxLot"), 2.0))
+    risk["riskPips"] = round(max(5.0, min(40.0, _num(risk.get("riskPips"), 10.0))), 2)
+    risk["opportunityLotMultiplier"] = round(max(0.1, min(1.0, _num(risk.get("opportunityLotMultiplier"), 0.35))), 2)
+
+
+def _repair_reason_zh(blocker: str, profile: str) -> str:
+    if profile.startswith("MAX_ADVERSE"):
+        return "针对最大逆行过高，放宽 stop R 分母、缩短持仓并收紧入场。"
+    if profile.startswith("LOW_SAMPLE"):
+        return "针对样本不足，放宽触发条件并切到更高样本密度周期。"
+    if blocker in {"WALK_FORWARD_UNSTABLE", "OVERFIT_RISK_HIGH"}:
+        return "针对 walk-forward 不稳定，缩短持仓、提前保护盈利并降低参数自由度。"
+    return "针对未晋级候选做保守质量修复，继续留在 shadow 评分。"
+
+
+def _quality_repair_sort_key(row: Dict[str, Any]) -> tuple:
+    fitness = _num(row.get("fitness"), -99.0)
+    breakdown = row.get("fitnessBreakdown") if isinstance(row.get("fitnessBreakdown"), dict) else {}
+    backtest = breakdown.get("strategyBacktest") if isinstance(breakdown.get("strategyBacktest"), dict) else {}
+    walk_forward = breakdown.get("walkForward") if isinstance(breakdown.get("walkForward"), dict) else {}
+    summary = walk_forward.get("summary") if isinstance(walk_forward.get("summary"), dict) else {}
+    blocker = str(row.get("blockerCode") or "")
+    blocker_score = {
+        "MAX_ADVERSE_TOO_HIGH": 4,
+        "WALK_FORWARD_UNSTABLE": 4,
+        "OVERFIT_RISK_HIGH": 3,
+        "INSUFFICIENT_SAMPLES": 3,
+        "WALK_FORWARD_INSUFFICIENT": 3,
+        "FITNESS_NOT_POSITIVE": 2,
+    }.get(blocker, 1)
+    return (
+        blocker_score,
+        fitness,
+        _num(backtest.get("netR"), 0.0),
+        _num(summary.get("stabilityScore"), 0.0),
+        _num(backtest.get("tradeCount"), 0.0),
+        _num(row.get("generation"), 0.0),
+        -_num(row.get("rank"), 9999.0),
+    )
+
+
+def _num(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
 def _load_case_memory(runtime_dir: Path) -> List[Dict[str, Any]]:
