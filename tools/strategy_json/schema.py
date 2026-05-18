@@ -38,6 +38,7 @@ DEFAULT_RSI: Dict[str, Any] = {
     "timeframe": "H1",
     "buyBand": 34,
     "crossbackThreshold": 0.8,
+    "regimeFilter": {"mode": "OFF"},
 }
 
 DEFAULT_MA: Dict[str, Any] = {

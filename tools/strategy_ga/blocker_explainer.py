@@ -13,6 +13,7 @@ BLOCKER_ZH = {
     "WALK_FORWARD_FAILED": "Walk-forward forward/validation 段不稳定",
     "WALK_FORWARD_UNSTABLE": "每个 seed 的 validation 或 forward 段不稳定，疑似过拟合",
     "OVERFIT_RISK": "过拟合风险偏高",
+    "RSI_MIN_TRADE_GATE": "RSI LONG 少于 20 笔有效交易，正收益不能晋级",
     "MAX_ADVERSE_TOO_HIGH": "最大不利波动扩大",
     "FITNESS_TOO_LOW": "综合 fitness 太低",
     "DUPLICATE_STRATEGY": "重复策略，已归档",

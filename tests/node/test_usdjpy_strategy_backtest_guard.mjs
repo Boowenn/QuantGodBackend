@@ -171,6 +171,9 @@ test('USDJPY Strategy JSON backtest covers all USDJPY shadow strategy families',
     'tokyoRange',
     'nightReversion',
     'h4Pullback',
+    'regimeFilter',
+    'entryEventFilter',
+    'eventFilteredSignals',
   ]) {
     assert.match(source, new RegExp(marker));
   }

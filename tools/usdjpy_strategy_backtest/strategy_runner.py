@@ -162,6 +162,11 @@ def _rsi_signals(strategy: Dict[str, Any], bars: List[Bar]) -> List[Dict[str, An
 
     closes = [item.close for item in bars]
     rsi_series = rsi_values(closes, period)
+    regime_cfg = rsi_cfg.get("regimeFilter") if isinstance(rsi_cfg.get("regimeFilter"), dict) else {}
+    fast_period = _int_param(regime_cfg, "emaFastPeriod", 20, 2, 120)
+    slow_period = _int_param(regime_cfg, "emaSlowPeriod", 50, fast_period + 1, 240)
+    fast_ema = ema_values(closes, fast_period) if _rsi_regime_filter_enabled(regime_cfg) else []
+    slow_ema = ema_values(closes, slow_period) if _rsi_regime_filter_enabled(regime_cfg) else []
     signals: List[Dict[str, Any]] = []
     index = period + 1
     while index < len(bars) - 2:
@@ -174,11 +179,96 @@ def _rsi_signals(strategy: Dict[str, Any], bars: List[Bar]) -> List[Dict[str, An
         short_cross = previous_rsi >= sell_band and current_rsi <= sell_band - crossback_threshold
         direction = str(strategy.get("direction") or "LONG").upper()
         if (direction == "LONG" and long_cross) or (direction == "SHORT" and short_cross):
-            signals.append(_signal(index + 1, direction, "RSI_CROSSBACK", {"rsi": round(current_rsi, 4)}))
+            regime = _rsi_regime_decision(bars, index, direction, regime_cfg, fast_ema, slow_ema)
+            if not regime.get("allowed", True):
+                index += 1
+                continue
+            evidence = {"rsi": round(current_rsi, 4)}
+            if regime.get("enabled"):
+                evidence["regimeFilter"] = regime.get("mode")
+                evidence["fastMinusSlowPips"] = regime.get("fastMinusSlowPips")
+                evidence["distanceFromSlowPips"] = regime.get("distanceFromSlowPips")
+                evidence["slowSlopePips"] = regime.get("slowSlopePips")
+            signals.append(_signal(index + 1, direction, "RSI_CROSSBACK", evidence))
             index += 3
         else:
             index += 1
     return signals
+
+
+def _rsi_regime_filter_enabled(regime_cfg: Dict[str, Any]) -> bool:
+    return bool(regime_cfg) and str(regime_cfg.get("mode") or "OFF").upper() not in {"", "OFF", "NONE"}
+
+
+def _rsi_regime_decision(
+    bars: List[Bar],
+    index: int,
+    direction: str,
+    regime_cfg: Dict[str, Any],
+    fast_ema: List[float | None],
+    slow_ema: List[float | None],
+) -> Dict[str, Any]:
+    if not _rsi_regime_filter_enabled(regime_cfg):
+        return {"enabled": False, "allowed": True}
+    mode = str(regime_cfg.get("mode") or "").upper()
+    allowed_hours = regime_cfg.get("allowedHoursUtc") if isinstance(regime_cfg.get("allowedHoursUtc"), list) else []
+    hour = _hour_utc(bars[index].timestamp)
+    if allowed_hours and hour not in _allowed_hours(allowed_hours):
+        return {"enabled": True, "allowed": False, "mode": mode, "reason": "HOUR_FILTER"}
+    if index >= len(fast_ema) or index >= len(slow_ema) or fast_ema[index] is None or slow_ema[index] is None:
+        return {"enabled": True, "allowed": False, "mode": mode, "reason": "EMA_NOT_READY"}
+
+    pip_size = 0.01
+    lookback = _int_param(regime_cfg, "slopeLookbackBars", 3, 1, 24)
+    lookback_index = max(0, index - lookback)
+    slow_now = float(slow_ema[index] or 0.0)
+    slow_then = slow_ema[lookback_index]
+    if slow_then is None:
+        return {"enabled": True, "allowed": False, "mode": mode, "reason": "SLOPE_NOT_READY"}
+
+    close = float(bars[index].close)
+    fast_minus_slow = (float(fast_ema[index] or 0.0) - slow_now) / pip_size
+    distance_from_slow = (close - slow_now) / pip_size
+    slow_slope = (slow_now - float(slow_then)) / pip_size
+    min_fast_minus_slow = _float_param(regime_cfg, "minFastMinusSlowPips", -500.0, -1000.0, 1000.0)
+    max_fast_minus_slow = _float_param(regime_cfg, "maxFastMinusSlowPips", 0.0, -1000.0, 1000.0)
+    min_distance = _float_param(regime_cfg, "minDistanceFromSlowPips", -260.0, -1000.0, 1000.0)
+    max_distance = _float_param(regime_cfg, "maxDistanceFromSlowPips", -50.0, -1000.0, 1000.0)
+    min_slope = _float_param(regime_cfg, "minSlowSlopePips", -45.0, -1000.0, 1000.0)
+    max_slope = _float_param(regime_cfg, "maxSlowSlopePips", -6.0, -1000.0, 1000.0)
+
+    allowed = True
+    reason = "PASS"
+    if mode == "P4_10E_RSI_BEARISH_STRETCH":
+        allowed = (
+            direction == "LONG"
+            and min_fast_minus_slow <= fast_minus_slow <= max_fast_minus_slow
+            and min_distance <= distance_from_slow <= max_distance
+            and min_slope <= slow_slope <= max_slope
+        )
+        if not allowed:
+            reason = "BEARISH_STRETCH_FILTER"
+    return {
+        "enabled": True,
+        "allowed": allowed,
+        "mode": mode,
+        "reason": reason,
+        "fastMinusSlowPips": round(fast_minus_slow, 2),
+        "distanceFromSlowPips": round(distance_from_slow, 2),
+        "slowSlopePips": round(slow_slope, 2),
+    }
+
+
+def _allowed_hours(values: List[Any]) -> set[int]:
+    hours: set[int] = set()
+    for value in values:
+        try:
+            hour = int(float(value))
+        except Exception:
+            continue
+        if 0 <= hour <= 23:
+            hours.add(hour)
+    return hours
 
 
 def _ma_cross_signals(strategy: Dict[str, Any], bars: List[Bar]) -> List[Dict[str, Any]]:
@@ -472,11 +562,13 @@ def _run_entries(
         "eventCount": int(historical_news.get("eventCount") or 0),
         "evaluatedSignals": 0,
         "hardBlockedSignals": 0,
+        "eventFilteredSignals": 0,
         "softAdjustedTrades": 0,
         "unknownSignals": 0,
         "lotMultiplierSum": 0.0,
         "reasonZh": historical_news.get("reasonZh") or "历史新闻门禁未接入。",
     }
+    event_filter = _event_filter_cfg(strategy)
     next_available_index = 0
     for signal in signals:
         entry_index = int(signal["entryIndex"])
@@ -488,6 +580,9 @@ def _run_entries(
             gate_stats["unknownSignals"] += 1
         if news_decision.get("hardBlock"):
             gate_stats["hardBlockedSignals"] += 1
+            continue
+        if _event_filter_blocks(news_decision, event_filter):
+            gate_stats["eventFilteredSignals"] += 1
             continue
         lot_multiplier = float(news_decision.get("lotMultiplier") or 1.0)
         gate_stats["lotMultiplierSum"] += lot_multiplier
@@ -515,6 +610,33 @@ def _run_entries(
         gate_stats["avgLotMultiplier"] = 0.0
     gate_stats.pop("lotMultiplierSum", None)
     return trades, gate_stats
+
+
+def _event_filter_cfg(strategy: Dict[str, Any]) -> Dict[str, Any]:
+    entry = strategy.get("entry") if isinstance(strategy.get("entry"), dict) else {}
+    config = entry.get("eventFilter") if isinstance(entry.get("eventFilter"), dict) else {}
+    mode = str(config.get("mode") or "OFF").upper()
+    if mode in {"", "OFF", "NONE"}:
+        return {}
+    return config
+
+
+def _event_filter_blocks(news_decision: Dict[str, Any], event_filter: Dict[str, Any]) -> bool:
+    if not event_filter:
+        return False
+    risk_level = str(news_decision.get("riskLevel") or "UNKNOWN").upper()
+    if risk_level == "UNKNOWN" and bool(event_filter.get("allowUnknownRisk", True)):
+        return False
+    allowed_levels = {
+        str(item or "").upper()
+        for item in event_filter.get("allowedRiskLevels", [])
+        if str(item or "").strip()
+    }
+    if allowed_levels and risk_level not in allowed_levels:
+        return True
+    if risk_level == "SOFT" and bool(event_filter.get("blockSoftRisk", False)):
+        return True
+    return False
 
 
 def _simulate_exit(
@@ -620,12 +742,14 @@ def _parity_vector(strategy: Dict[str, Any], bars: List[Bar], signals: List[Dict
         "direction": strategy.get("direction"),
         "entryMode": entry_cfg.get("mode"),
         "entryConditions": entry_cfg.get("conditions") if isinstance(entry_cfg.get("conditions"), list) else [],
+        "entryEventFilter": entry_cfg.get("eventFilter") if isinstance(entry_cfg.get("eventFilter"), dict) else {},
         "rsi": {
             "period": rsi_cfg.get("period"),
             "timeframe": rsi_cfg.get("timeframe"),
             "buyBand": rsi_cfg.get("buyBand"),
             "sellBand": rsi_cfg.get("sellBand"),
             "crossbackThreshold": rsi_cfg.get("crossbackThreshold"),
+            "regimeFilter": rsi_cfg.get("regimeFilter") if isinstance(rsi_cfg.get("regimeFilter"), dict) else {},
         },
         "familyParameters": {
             "ma": indicators.get("ma") if isinstance(indicators.get("ma"), dict) else {},

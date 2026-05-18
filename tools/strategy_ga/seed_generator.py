@@ -29,11 +29,13 @@ QUALITY_REPAIR_BLOCKERS = {
     "STRATEGY_BACKTEST_NO_TRADES",
     "OVERFIT_RISK",
     "OVERFIT_RISK_HIGH",
+    "RSI_MIN_TRADE_GATE",
     "FITNESS_NOT_POSITIVE",
 }
 P4_10D_RSI_FOCUS_BLOCKERS = {
     "OVERFIT_RISK",
     "OVERFIT_RISK_HIGH",
+    "RSI_MIN_TRADE_GATE",
     "WALK_FORWARD_UNSTABLE",
     "WALK_FORWARD_INSUFFICIENT",
     "INSUFFICIENT_SAMPLES",
@@ -380,7 +382,7 @@ def _rsi_focus_sort_key(row: Dict[str, Any]) -> tuple:
     trade_count = int(_num(backtest.get("tradeCount"), 0))
     blocker = str(row.get("blockerCode") or "")
     return (
-        1 if blocker in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH"} else 0,
+        1 if blocker in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH", "RSI_MIN_TRADE_GATE"} else 0,
         min(40, max(sample_count, trade_count)),
         _num(summary.get("stabilityScore"), 0.0),
         _num(row.get("fitness"), -99.0),
@@ -456,8 +458,10 @@ def _repair_profiles_for_row(row: Dict[str, Any]) -> List[str]:
                 "BB_SHORT_RECLAIM_WIDE_BAND",
             ]
     elif family == "RSI_Reversal" and blocker in QUALITY_REPAIR_BLOCKERS:
-        if blocker in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH"}:
+        if blocker in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH", "RSI_MIN_TRADE_GATE"}:
             family_profiles = [
+                "RSI_REVERSAL_REGIME_EVENT_FILTER",
+                "RSI_REVERSAL_20_TRADE_GATE_BALANCER",
                 "RSI_REVERSAL_OVERFIT_SAMPLE_EXPANDER",
                 "RSI_REVERSAL_WALK_FORWARD_BALANCER",
                 "RSI_REVERSAL_SEGMENT_SAMPLE_BALANCER",
@@ -697,7 +701,31 @@ def _apply_rsi_reversal_profile(seed: Dict[str, Any], profile: str, offset: int)
     exit_cfg = seed.setdefault("exit", {})
     risk = seed.setdefault("risk", {})
     direction = str(seed.get("direction") or "LONG").upper()
-    if profile == "RSI_REVERSAL_OVERFIT_SAMPLE_EXPANDER":
+    if profile == "RSI_REVERSAL_REGIME_EVENT_FILTER":
+        _apply_p4_10e_rsi_filters(seed, offset, strict=True)
+        rsi["timeframe"] = "H1"
+        rsi["period"] = [24, 26, 28][offset % 3]
+        rsi["buyBand"] = [27, 28, 29][offset % 3]
+        rsi["crossbackThreshold"] = [0.45, 0.6, 0.75][offset % 3]
+        _set_exit(seed, hold_h1=[3, 4, 5][offset % 3], hold_m15=[5, 6, 7][offset % 3])
+        exit_cfg["trailStartR"] = [0.8, 0.9, 1.0][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.42, 0.46, 0.5][offset % 3]
+        exit_cfg["breakevenDelayR"] = [0.45, 0.55, 0.65][offset % 3]
+        risk["riskPips"] = max([14.0, 16.0, 18.0][offset % 3], _num(risk.get("riskPips"), 10.0))
+        risk["opportunityLotMultiplier"] = min(0.28, _num(risk.get("opportunityLotMultiplier"), 0.35))
+    elif profile == "RSI_REVERSAL_20_TRADE_GATE_BALANCER":
+        _apply_p4_10e_rsi_filters(seed, offset, strict=False)
+        rsi["timeframe"] = "H1"
+        rsi["period"] = [20, 22, 24][offset % 3]
+        rsi["buyBand"] = [28, 29, 30][offset % 3]
+        rsi["crossbackThreshold"] = [0.35, 0.5, 0.65][offset % 3]
+        _set_exit(seed, hold_h1=[4, 5, 6][offset % 3], hold_m15=[6, 7, 8][offset % 3])
+        exit_cfg["trailStartR"] = [0.85, 0.95, 1.05][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.44, 0.48, 0.52][offset % 3]
+        exit_cfg["breakevenDelayR"] = [0.5, 0.6, 0.7][offset % 3]
+        risk["riskPips"] = max([14.0, 16.0, 18.0][offset % 3], _num(risk.get("riskPips"), 10.0))
+        risk["opportunityLotMultiplier"] = min(0.3, _num(risk.get("opportunityLotMultiplier"), 0.35))
+    elif profile == "RSI_REVERSAL_OVERFIT_SAMPLE_EXPANDER":
         rsi["timeframe"] = "H1"
         rsi["period"] = [21, 23, 25][offset % 3]
         rsi["buyBand"] = [30, 31, 32][offset % 3]
@@ -765,6 +793,36 @@ def _apply_rsi_reversal_profile(seed: Dict[str, Any], profile: str, offset: int)
         risk["opportunityLotMultiplier"] = min(0.32, _num(risk.get("opportunityLotMultiplier"), 0.35))
     if direction == "SHORT":
         rsi["sellBand"] = max(55, min(75, 100 - float(rsi.get("buyBand", 34))))
+
+
+def _apply_p4_10e_rsi_filters(seed: Dict[str, Any], offset: int, strict: bool) -> None:
+    indicators = seed.setdefault("indicators", {})
+    rsi = indicators.setdefault("rsi", {})
+    rsi["regimeFilter"] = {
+        "mode": "P4_10E_RSI_BEARISH_STRETCH",
+        "allowedHoursUtc": [0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+        "emaFastPeriod": 20,
+        "emaSlowPeriod": 50,
+        "slopeLookbackBars": 3,
+        "minFastMinusSlowPips": -220 if strict else -260,
+        "maxFastMinusSlowPips": -12 if strict else -6,
+        "minDistanceFromSlowPips": -240 if strict else -280,
+        "maxDistanceFromSlowPips": -55 if strict else -45,
+        "minSlowSlopePips": -42 if strict else -50,
+        "maxSlowSlopePips": -7 if strict else -4,
+    }
+    entry = seed.setdefault("entry", {})
+    entry["eventFilter"] = {
+        "mode": "P4_10E_RSI_AVOID_KNOWN_EVENT_RISK",
+        "allowedRiskLevels": ["NONE", "UNKNOWN"],
+        "blockSoftRisk": True,
+        "allowUnknownRisk": True,
+    }
+    conditions = entry.get("conditions") if isinstance(entry.get("conditions"), list) else []
+    for condition in ("rsi.regimeFilter == P4_10E_RSI_BEARISH_STRETCH", "eventRisk not in ['HARD','SOFT']"):
+        if condition not in conditions:
+            conditions.append(condition)
+    entry["conditions"] = conditions
 
 
 def _apply_macd_profile(seed: Dict[str, Any], profile: str, offset: int) -> None:
@@ -977,6 +1035,10 @@ def _enforce_shadow_safety(seed: Dict[str, Any]) -> None:
 
 
 def _repair_reason_zh(blocker: str, profile: str) -> str:
+    if profile.startswith("RSI_REVERSAL_REGIME_EVENT_FILTER"):
+        return "P4-10E 针对 RSI 小样本正收益，只允许在 H1 bearish-stretch 与已知事件风险外扩样。"
+    if profile.startswith("RSI_REVERSAL_20_TRADE_GATE"):
+        return "P4-10E 针对 RSI 晋级门槛，强制搜索 >=20 笔交易后仍能保持正 netR 的参数。"
     if profile.startswith("RSI_REVERSAL_OVERFIT") or profile == "RSI_REVERSAL_SEGMENT_SAMPLE_BALANCER":
         return "P4-10D 针对 RSI 小样本过拟合，放宽触发并扩大跨分段有效交易样本。"
     if profile == "RSI_REVERSAL_WALK_FORWARD_BALANCER":
@@ -1002,6 +1064,7 @@ def _quality_repair_sort_key(row: Dict[str, Any]) -> tuple:
         "WALK_FORWARD_UNSTABLE": 4,
         "OVERFIT_RISK": 4,
         "OVERFIT_RISK_HIGH": 3,
+        "RSI_MIN_TRADE_GATE": 4,
         "INSUFFICIENT_SAMPLES": 3,
         "STRATEGY_BACKTEST_NO_TRADES": 3,
         "WALK_FORWARD_INSUFFICIENT": 3,

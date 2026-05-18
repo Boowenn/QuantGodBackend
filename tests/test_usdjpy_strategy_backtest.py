@@ -18,6 +18,7 @@ from tools.strategy_json.validator import validate_strategy_json
 from tools.usdjpy_strategy_backtest.history_sync import build_history_production_status, sync_historical_klines
 from tools.usdjpy_strategy_backtest.historical_news import classify_historical_news, load_historical_news_events
 from tools.usdjpy_strategy_backtest.report import build_sample, run_backtest, status
+from tools.usdjpy_strategy_backtest.strategy_runner import _event_filter_blocks, _rsi_regime_decision
 from tools.usdjpy_strategy_backtest.schema import (
     backtest_cache_path,
     equity_path,
@@ -159,6 +160,17 @@ class USDJPYStrategyBacktestTests(unittest.TestCase):
             hard = classify_historical_news("2026-05-07T17:45:00Z", events)
             self.assertEqual(hard["riskLevel"], "HARD")
             self.assertTrue(hard["hardBlock"])
+
+    def test_p4_10e_event_filter_blocks_known_soft_news_but_allows_unknown_history(self):
+        event_filter = {
+            "mode": "P4_10E_RSI_AVOID_KNOWN_EVENT_RISK",
+            "allowedRiskLevels": ["NONE", "UNKNOWN"],
+            "blockSoftRisk": True,
+            "allowUnknownRisk": True,
+        }
+
+        self.assertTrue(_event_filter_blocks({"riskLevel": "SOFT"}, event_filter))
+        self.assertFalse(_event_filter_blocks({"riskLevel": "UNKNOWN"}, event_filter))
 
     def test_all_usdjpy_strategy_families_have_backtest_runner_coverage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -600,13 +612,102 @@ class USDJPYStrategyBacktestTests(unittest.TestCase):
             repair = quality_repair_seed_pool(runtime_dir, generation_number=44, limit=4)[0]
             rsi = repair["indicators"]["rsi"]
 
-            self.assertEqual(repair["qualityProfile"], "RSI_REVERSAL_OVERFIT_SAMPLE_EXPANDER")
+            self.assertEqual(repair["qualityProfile"], "RSI_REVERSAL_REGIME_EVENT_FILTER")
             self.assertEqual(repair["repairTargetBlocker"], "OVERFIT_RISK")
             self.assertEqual(rsi["timeframe"], "H1")
-            self.assertGreaterEqual(rsi["buyBand"], 30)
-            self.assertLessEqual(rsi["crossbackThreshold"], 0.65)
-            self.assertGreaterEqual(repair["exit"]["timeStopBars"]["M15"], 6)
+            self.assertEqual(rsi["regimeFilter"]["mode"], "P4_10E_RSI_BEARISH_STRETCH")
+            self.assertTrue(repair["entry"]["eventFilter"]["blockSoftRisk"])
+            self.assertLessEqual(rsi["buyBand"], 29)
+            self.assertGreaterEqual(repair["exit"]["timeStopBars"]["H1"], 3)
             self.assertTrue(validate_strategy_json(repair)["valid"])
+
+    def test_p4_10e_rsi_regime_filter_allows_only_bearish_stretch_hours(self):
+        start = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+        bars = []
+        price = 160.0
+        for index in range(80):
+            close = price - 0.08
+            bars.append(
+                Bar(
+                    timestamp=(start + timedelta(hours=index)).isoformat().replace("+00:00", "Z"),
+                    open=round(price, 5),
+                    high=round(price + 0.02, 5),
+                    low=round(close - 0.02, 5),
+                    close=round(close, 5),
+                    volume=1000 + index,
+                    spread=12,
+                )
+            )
+            price = close
+        from tools.usdjpy_strategy_backtest.indicators import ema_values
+
+        closes = [bar.close for bar in bars]
+        fast = ema_values(closes, 20)
+        slow = ema_values(closes, 50)
+        cfg = {
+            "mode": "P4_10E_RSI_BEARISH_STRETCH",
+            "allowedHoursUtc": [7],
+            "emaFastPeriod": 20,
+            "emaSlowPeriod": 50,
+            "slopeLookbackBars": 3,
+            "minFastMinusSlowPips": -260,
+            "maxFastMinusSlowPips": -6,
+            "minDistanceFromSlowPips": -280,
+            "maxDistanceFromSlowPips": -45,
+            "minSlowSlopePips": -50,
+            "maxSlowSlopePips": -4,
+        }
+
+        blocked_cfg = {**cfg, "allowedHoursUtc": [8]}
+        allowed = _rsi_regime_decision(bars, 55, "LONG", cfg, fast, slow)
+        blocked = _rsi_regime_decision(bars, 55, "LONG", blocked_cfg, fast, slow)
+
+        self.assertTrue(allowed["allowed"], allowed)
+        self.assertFalse(blocked["allowed"], blocked)
+        self.assertEqual(blocked["reason"], "HOUR_FILTER")
+
+    def test_p4_10e_rsi_positive_edge_requires_twenty_trades(self):
+        seed = base_strategy_seed("RSI-MIN-TRADE-GATE", family="RSI_Reversal", direction="LONG")
+        metrics = {
+            "sampleCount": 5,
+            "netR": 3.8,
+            "maxAdverseR": 0.0,
+            "profitCaptureRatio": 0.0,
+            "missedOpportunityReduction": 0.0,
+            "validationNetRDelta": 0.2,
+            "forwardNetRDelta": 0.2,
+            "walkForward": {
+                "summary": {
+                    "promotionGateStatus": "PASS",
+                    "stabilityScore": 0.8,
+                    "validSegmentCount": 3,
+                    "validationNetR": 1.0,
+                    "forwardNetR": 1.0,
+                    "sampleCount": 5,
+                }
+            },
+            "strategyBacktest": {
+                "present": True,
+                "ok": True,
+                "tradeCount": 5,
+                "profitFactor": 2.5,
+                "winRate": 80.0,
+                "maxDrawdownR": 0.1,
+                "sharpe": 1.0,
+                "sortino": 1.0,
+            },
+            "parity": {"promotionGateStatus": "PASS"},
+            "executionFeedback": {"promotionGateStatus": "PASS"},
+            "strategyContractShadow": {},
+            "evidencePenalty": 0.0,
+            "historyProductionStatus": {"promotionGateStatus": "PASS"},
+        }
+        with patch("tools.strategy_ga.fitness.evidence_metrics", return_value=metrics):
+            score = score_seed(seed, Path("/tmp"))
+
+        self.assertEqual(score["blockerCode"], "RSI_MIN_TRADE_GATE")
+        self.assertGreater(score["rsiMinTradeGatePenalty"], 0)
+        self.assertLess(score["fitness"], 0)
 
     def test_history_sync_pulls_incremental_usdjpy_bars_from_mt5(self):
         class FakeMT5(types.SimpleNamespace):

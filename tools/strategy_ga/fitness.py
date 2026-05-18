@@ -201,6 +201,13 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
     backtest_no_trade_penalty = 2.0 if backtest.get("present") and backtest.get("ok") and backtest_trade_count == 0 else 0.0
     trade_frequency_penalty = 0.15 if sample_count == 0 else 0.0
     rsi_overfit_sample_penalty = _rsi_overfit_sample_penalty(family, direction, sample_count, overfit_penalty)
+    rsi_min_trade_gate_penalty = _rsi_min_trade_gate_penalty(
+        family,
+        direction,
+        sample_count,
+        backtest_trade_count,
+        metrics["netR"],
+    )
     evidence_penalty = float(metrics.get("evidencePenalty", 0.0))
     strategy_contract_shadow_bonus = _strategy_contract_shadow_bonus(metrics.get("strategyContractShadow", {}))
     profit_factor_bonus = _profit_factor_bonus(_num(backtest.get("profitFactor"), 0))
@@ -222,6 +229,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         - max_adverse_penalty
         - overfit_penalty
         - rsi_overfit_sample_penalty
+        - rsi_min_trade_gate_penalty
         - backtest_no_trade_penalty
         - walk_forward_penalty
         - low_sample_penalty
@@ -240,6 +248,8 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         blocker = "STRATEGY_BACKTEST_NO_TRADES"
     elif sample_count < 5:
         blocker = "INSUFFICIENT_SAMPLES"
+    elif _rsi_min_trade_gate_blocks(family, direction, sample_count, backtest_trade_count, metrics["netR"]):
+        blocker = "RSI_MIN_TRADE_GATE"
     elif walk_forward_summary.get("promotionGateStatus") == "BLOCKED":
         blocker = walk_forward_summary.get("blockerCode") or "WALK_FORWARD_FAILED"
     elif overfit_penalty:
@@ -266,6 +276,7 @@ def score_seed(seed: Dict[str, Any], runtime_dir: Path) -> Dict[str, Any]:
         "maxDrawdownPenalty": round(max_drawdown_penalty, 4),
         "tradeFrequencyPenalty": round(trade_frequency_penalty, 4),
         "rsiOverfitSamplePenalty": round(rsi_overfit_sample_penalty, 4),
+        "rsiMinTradeGatePenalty": round(rsi_min_trade_gate_penalty, 4),
         "evidencePenalty": round(evidence_penalty, 4),
         "profitFactorBonus": round(profit_factor_bonus, 4),
         "winRateBonus": round(win_rate_bonus, 4),
@@ -290,6 +301,32 @@ def _rsi_overfit_sample_penalty(family: Any, direction: Any, sample_count: int, 
     if sample_count >= 24:
         return 0.0
     return round(min(1.2, (24 - max(0, sample_count)) / 12.0), 4)
+
+
+def _rsi_min_trade_gate_blocks(
+    family: Any,
+    direction: Any,
+    sample_count: int,
+    trade_count: int,
+    net_r: float,
+) -> bool:
+    if family != "RSI_Reversal" or str(direction or "").upper() != "LONG":
+        return False
+    return net_r > 0 and max(sample_count, trade_count) < 20
+
+
+def _rsi_min_trade_gate_penalty(
+    family: Any,
+    direction: Any,
+    sample_count: int,
+    trade_count: int,
+    net_r: float,
+) -> float:
+    if not _rsi_min_trade_gate_blocks(family, direction, sample_count, trade_count, net_r):
+        return 0.0
+    effective_count = max(0, max(sample_count, trade_count))
+    sample_gap = max(0, 20 - effective_count)
+    return round(min(7.0, 1.0 + sample_gap * 0.32 + max(0.0, net_r) * 0.25), 4)
 
 
 def _execution_penalty(metrics: Dict[str, Any]) -> float:

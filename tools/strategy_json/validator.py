@@ -35,6 +35,45 @@ def _check_timeframe(name: str, value: Any) -> Tuple[bool, str]:
     return True, ""
 
 
+def _check_rsi_regime_filter(config: Dict[str, Any]) -> Tuple[bool, str]:
+    mode = str(config.get("mode") or "OFF").upper()
+    if mode not in {"OFF", "NONE", "P4_10E_RSI_BEARISH_STRETCH"}:
+        return False, "RSI regimeFilter mode 不合法"
+    if mode in {"OFF", "NONE"}:
+        return True, ""
+    hours = config.get("allowedHoursUtc") if isinstance(config.get("allowedHoursUtc"), list) else []
+    if any(_num(hour, -1) < 0 or _num(hour, -1) > 23 for hour in hours):
+        return False, "RSI regimeFilter allowedHoursUtc 不合法"
+    checks = [
+        _check_range("RSI regimeFilter emaFastPeriod", config.get("emaFastPeriod", 20), 2, 120),
+        _check_range("RSI regimeFilter emaSlowPeriod", config.get("emaSlowPeriod", 50), 3, 240),
+        _check_range("RSI regimeFilter slopeLookbackBars", config.get("slopeLookbackBars", 3), 1, 24),
+        _check_range("RSI regimeFilter minFastMinusSlowPips", config.get("minFastMinusSlowPips", -500), -1000, 1000),
+        _check_range("RSI regimeFilter maxFastMinusSlowPips", config.get("maxFastMinusSlowPips", 0), -1000, 1000),
+        _check_range("RSI regimeFilter minDistanceFromSlowPips", config.get("minDistanceFromSlowPips", -260), -1000, 1000),
+        _check_range("RSI regimeFilter maxDistanceFromSlowPips", config.get("maxDistanceFromSlowPips", -50), -1000, 1000),
+        _check_range("RSI regimeFilter minSlowSlopePips", config.get("minSlowSlopePips", -45), -1000, 1000),
+        _check_range("RSI regimeFilter maxSlowSlopePips", config.get("maxSlowSlopePips", -6), -1000, 1000),
+    ]
+    for ok, reason in checks:
+        if not ok:
+            return ok, reason
+    if _num(config.get("emaFastPeriod"), 20) >= _num(config.get("emaSlowPeriod"), 50):
+        return False, "RSI regimeFilter emaFastPeriod 必须小于 emaSlowPeriod"
+    return True, ""
+
+
+def _check_entry_event_filter(config: Dict[str, Any]) -> Tuple[bool, str]:
+    mode = str(config.get("mode") or "OFF").upper()
+    if mode not in {"OFF", "NONE", "P4_10E_RSI_AVOID_KNOWN_EVENT_RISK"}:
+        return False, "entry eventFilter mode 不合法"
+    levels = config.get("allowedRiskLevels") if isinstance(config.get("allowedRiskLevels"), list) else []
+    allowed = {"NONE", "UNKNOWN", "SOFT", "HARD"}
+    if any(str(item or "").upper() not in allowed for item in levels):
+        return False, "entry eventFilter allowedRiskLevels 不合法"
+    return True, ""
+
+
 def _reject(seed: Dict[str, Any], code: str, reason: str, details: List[str] | None = None) -> Dict[str, Any]:
     return {
         "seedId": seed.get("seedId", "UNKNOWN"),
@@ -75,6 +114,7 @@ def validate_strategy_json(seed: Dict[str, Any]) -> Dict[str, Any]:
         return _reject(data, "TIMEFRAME_INVALID", "周期字段不合法")
 
     rsi = ((data.get("indicators") or {}).get("rsi") or {})
+    entry = data.get("entry") if isinstance(data.get("entry"), dict) else {}
     indicators = data.get("indicators") if isinstance(data.get("indicators"), dict) else {}
     ma = indicators.get("ma") if isinstance(indicators.get("ma"), dict) else {}
     bollinger = indicators.get("bollinger") if isinstance(indicators.get("bollinger"), dict) else {}
@@ -88,6 +128,8 @@ def validate_strategy_json(seed: Dict[str, Any]) -> Dict[str, Any]:
         _check_range("RSI period", rsi.get("period"), 2, 50),
         _check_range("RSI buyBand", rsi.get("buyBand"), 5, 45),
         _check_range("RSI crossbackThreshold", rsi.get("crossbackThreshold"), 0, 3),
+        _check_rsi_regime_filter(rsi.get("regimeFilter") if isinstance(rsi.get("regimeFilter"), dict) else {}),
+        _check_entry_event_filter(entry.get("eventFilter") if isinstance(entry.get("eventFilter"), dict) else {}),
         _check_timeframe("MA", ma.get("timeframe")),
         _check_range("MA fastPeriod", ma.get("fastPeriod"), 2, 80),
         _check_range("MA slowPeriod", ma.get("slowPeriod"), 3, 240),
