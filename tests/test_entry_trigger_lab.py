@@ -64,6 +64,50 @@ class EntryTriggerLabTests(unittest.TestCase):
             self.assertTrue(decision["confirmations"]["快通道质量通过"])
             self.assertEqual(decision["state"],"WAIT_TRIGGER_CONFIRMATION")
 
+    def test_stale_degraded_fastlane_exporter_uses_fresh_dashboard_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime=Path(tmp); runtime.mkdir(parents=True, exist_ok=True)
+            (runtime/"quality").mkdir(parents=True, exist_ok=True); (runtime/"adaptive").mkdir(parents=True, exist_ok=True)
+            (runtime/"QuantGod_Dashboard.json").write_text(json.dumps({
+                "watchlist":"USDJPYc",
+                "runtime":{"tradeStatus":"READY","executionEnabled":True,"readOnlyMode":False,"tickAgeSeconds":2},
+                "market":{"bid":155.92,"ask":155.95,"spread":3.0},
+            }), encoding="utf-8")
+            (runtime/"quality"/"QuantGod_MT5FastLaneQuality.json").write_text(json.dumps({
+                "schema":"quantgod.mt5.fastlane.quality.v1",
+                "heartbeatFound":True,
+                "heartbeatFresh":False,
+                "heartbeatAgeSeconds":120,
+                "heartbeatFreshLimitSeconds":90,
+                "quality":"DEGRADED",
+                "symbols":[{
+                    "symbol":"USDJPYc",
+                    "quality":"DEGRADED",
+                    "tickRows":3,
+                    "tickAgeSeconds":2,
+                    "indicatorAgeSeconds":39,
+                    "checks":[
+                        {"name":"tick_fast_lane","passed":False,"reason":"tick年龄=9秒"},
+                        {"name":"indicator_lane","passed":False},
+                        {"name":"tick_rows","passed":True},
+                        {"name":"spread","passed":True},
+                    ],
+                }],
+            }), encoding="utf-8")
+            (runtime/"adaptive"/"QuantGod_DynamicEntryGate.json").write_text(json.dumps({
+                "entryGates":[{"symbol":"USDJPYc","direction":"LONG","passed":True,"state":"PASS"}],
+            }), encoding="utf-8")
+            (runtime/"ShadowCandidateOutcomeLedger.csv").write_text(
+                "symbol,direction,scoreR,pips\n"
+                "USDJPYc,LONG,0.42,4.2\n"
+                "USDJPYc,LONG,0.27,2.7\n"
+                "USDJPYc,LONG,0.13,1.3\n",
+                encoding="utf-8",
+            )
+            plan=build_trigger_plan(runtime,["USDJPYc"],directions=["LONG"]); decision=plan["decisions"][0]
+            self.assertTrue(decision["confirmations"]["快通道质量通过"])
+            self.assertEqual(decision["state"],"WAIT_TRIGGER_CONFIRMATION")
+
     def test_candidate_outcome_ledger_fields_count_as_shadow_samples(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime=Path(tmp); runtime.mkdir(parents=True, exist_ok=True)

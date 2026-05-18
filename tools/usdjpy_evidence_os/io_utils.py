@@ -103,12 +103,28 @@ def append_jsonl_unique(path: Path, rows: Iterable[Dict[str, Any]], key: str) ->
 
 
 def read_jsonl_tail(path: Path, limit: int = 200) -> List[Dict[str, Any]]:
-    if not path.exists():
+    if limit <= 0 or not path.exists():
+        return []
+    lines: List[bytes] = []
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            buffer = b""
+            block_size = 64 * 1024
+            while position > 0 and len(lines) <= limit:
+                read_size = min(block_size, position)
+                position -= read_size
+                handle.seek(position)
+                buffer = handle.read(read_size) + buffer
+                lines = buffer.splitlines()
+        raw_lines = lines[-limit:]
+    except Exception:
         return []
     rows: List[Dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()[-limit:]:
+    for line in raw_lines:
         try:
-            data = json.loads(line)
+            data = json.loads(line.decode("utf-8", errors="ignore"))
             if isinstance(data, dict):
                 rows.append(data)
         except Exception:

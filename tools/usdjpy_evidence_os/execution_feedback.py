@@ -64,6 +64,7 @@ def build_execution_feedback(runtime_dir: Path, write: bool = True) -> Dict[str,
         [_normalize_row(index, row, source) for index, (row, source) in enumerate(rows, start=1)]
     )
     metrics = _metrics(normalized)
+    metrics = {**metrics, **_spread_guard_context(runtime_dir)}
     field_completeness = _field_completeness(normalized)
     metrics = {
         **metrics,
@@ -284,6 +285,8 @@ def _quality_gates(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _quality_gates_from_metrics(metrics: Dict[str, Any], field_completeness: Dict[str, Any]) -> List[Dict[str, Any]]:
+    spread_anomaly_count = int(metrics.get("spreadAnomalyCount") or 0)
+    spread_guard_covered = bool(metrics.get("spreadGuardCovered"))
     return [
         {
             "name": "slippage",
@@ -302,8 +305,16 @@ def _quality_gates_from_metrics(metrics: Dict[str, Any], field_completeness: Dic
         },
         {
             "name": "spread_at_entry",
-            "status": "PASS" if int(metrics.get("spreadAnomalyCount") or 0) == 0 else "WARN",
-            "reasonZh": "入场点差未发现异常" if int(metrics.get("spreadAnomalyCount") or 0) == 0 else "入场点差异常，需要限制触发窗口或等待流动性恢复",
+            "status": "PASS" if spread_anomaly_count == 0 or spread_guard_covered else "WARN",
+            "reasonZh": (
+                "入场点差未发现异常"
+                if spread_anomaly_count == 0
+                else (
+                    "历史入场点差异常已由当前 EA 点差守门覆盖；点差超过上限时 EA 会阻断入场。"
+                    if spread_guard_covered
+                    else "入场点差异常，需要限制触发窗口或等待流动性恢复"
+                )
+            ),
         },
         {
             "name": "accepted_without_fill",
@@ -695,6 +706,30 @@ def _dedupe_feedback(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _recent_feedback(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     execution_rows = [row for row in rows if _is_live_execution_row(row)]
     return (execution_rows or rows)[-20:]
+
+
+def _spread_guard_context(runtime_dir: Path) -> Dict[str, Any]:
+    diagnostics = _latest_rsi_diagnostics(runtime_dir)
+    guards = diagnostics.get("guards") if isinstance(diagnostics.get("guards"), dict) else {}
+    spread_allowed = guards.get("spreadAllowed")
+    spread_pips = _num(guards.get("spreadPips"))
+    max_spread_pips = _num(guards.get("maxSpreadPips"))
+    state = str(diagnostics.get("state") or diagnostics.get("stateZh") or "")
+    covered = spread_allowed is False and max_spread_pips > 0 and spread_pips > max_spread_pips
+    return {
+        "spreadGuardCovered": covered,
+        "spreadGuardState": state,
+        "currentSpreadPips": spread_pips,
+        "maxAllowedSpreadPips": max_spread_pips,
+    }
+
+
+def _latest_rsi_diagnostics(runtime_dir: Path) -> Dict[str, Any]:
+    for directory in candidate_mt5_files_dirs(runtime_dir):
+        diagnostics = load_json(directory / "QuantGod_USDJPYRsiEntryDiagnostics.json")
+        if diagnostics:
+            return diagnostics
+    return {}
 
 
 def _is_live_execution_row(row: Dict[str, Any]) -> bool:

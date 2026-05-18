@@ -13,7 +13,14 @@ except ModuleNotFoundError:  # CLI execution from tools/
     from news_gate.classifier import classify_news_gate
     from news_gate.policy import apply_news_gate_to_live_policy
 
-from .data_loader import adaptive_policy, dynamic_sltp, entry_trigger_plan, fastlane_quality, focus_runtime_snapshot
+from .data_loader import (
+    adaptive_policy,
+    dynamic_sltp,
+    entry_trigger_plan,
+    fastlane_quality,
+    focus_runtime_snapshot,
+    runtime_fresh_limit_seconds,
+)
 from .schema import (
     ENTRY_BLOCKED,
     ENTRY_OPPORTUNITY,
@@ -59,8 +66,9 @@ def _runtime_ok(snapshot: Dict[str, Any]) -> tuple[bool, List[str]]:
         reasons.append("运行快照处于回退模式")
     age = snapshot.get("runtimeAgeSeconds")
     fresh = snapshot.get("runtimeFresh")
+    fresh_limit = runtime_fresh_limit_seconds()
     try:
-        if age is not None and float(age) > 30:
+        if age is not None and float(age) > fresh_limit:
             reasons.append(f"运行快照过旧：{age}s")
     except Exception:
         pass

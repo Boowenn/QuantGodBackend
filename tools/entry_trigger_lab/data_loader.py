@@ -94,6 +94,39 @@ def _empty_fastlane_exporter(payload: Dict[str, Any], item: Optional[Dict[str, A
         tick_rows = 0.0
     return tick_rows <= 0 and row.get("tickAgeSeconds") in (None, "", "null") and row.get("indicatorAgeSeconds") in (None, "", "null")
 
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value in (None, ""):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _degraded_by_stale_fastlane_exporter(payload: Dict[str, Any], item: Optional[Dict[str, Any]]) -> bool:
+    row = item if isinstance(item, dict) else {}
+    quality = str(row.get("quality") or row.get("state") or payload.get("quality") or "MISSING").upper()
+    if quality in {"OK", "PASS", "PASSED", "GOOD", "HEALTHY", "FAST", "EA_DASHBOARD_OK"}:
+        return False
+    failed_checks = {
+        str(check.get("name") or "")
+        for check in row.get("checks", [])
+        if isinstance(check, dict) and check.get("passed") is False
+    }
+    stale_exporter_checks = {"indicator_lane", "tick_fast_lane"}
+    if failed_checks and not failed_checks.issubset(stale_exporter_checks):
+        return False
+    tick_age = _as_float(row.get("tickAgeSeconds"), 9999.0)
+    tick_rows = _as_float(row.get("tickRows"), 0.0)
+    heartbeat_limit = _as_float(payload.get("heartbeatFreshLimitSeconds"), 90.0)
+    heartbeat_age = _as_float(payload.get("heartbeatAgeSeconds"), 0.0)
+    heartbeat_stale = payload.get("heartbeatFresh") is False or heartbeat_age > heartbeat_limit
+    indicator_stale = "indicator_lane" in failed_checks or _as_float(row.get("indicatorAgeSeconds"), 0.0) > 30
+    tick_lane_stale = "tick_fast_lane" in failed_checks and tick_age <= 30
+    return tick_age <= 30 and tick_rows >= 1 and (heartbeat_stale or indicator_stale or tick_lane_stale)
+
+
 def discover_fastlane_quality(runtime_dir: Path, symbol: str) -> Dict[str, Any]:
     for candidate in [runtime_dir / "quality" / "QuantGod_MT5FastLaneQuality.json", runtime_dir / "QuantGod_MT5FastLaneQuality.json"]:
         payload = read_json(candidate)
@@ -114,6 +147,10 @@ def discover_fastlane_quality(runtime_dir: Path, symbol: str) -> Dict[str, Any]:
                         fallback = _fresh_dashboard_fallback(runtime_dir, symbol)
                         if fallback:
                             return fallback
+                    if _degraded_by_stale_fastlane_exporter(payload, item):
+                        fallback = _fresh_dashboard_fallback(runtime_dir, symbol)
+                        if fallback:
+                            return fallback
                     return item
             return {}
         if isinstance(symbols, list):
@@ -127,6 +164,10 @@ def discover_fastlane_quality(runtime_dir: Path, symbol: str) -> Dict[str, Any]:
                     result.setdefault("focusSymbolFound", True)
                     result.setdefault("sourceQuality", payload.get("quality"))
                     if _empty_fastlane_exporter(payload, result):
+                        fallback = _fresh_dashboard_fallback(runtime_dir, symbol)
+                        if fallback:
+                            return fallback
+                    if _degraded_by_stale_fastlane_exporter(payload, result):
                         fallback = _fresh_dashboard_fallback(runtime_dir, symbol)
                         if fallback:
                             return fallback

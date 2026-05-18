@@ -11,6 +11,7 @@ from tools.strategy_ga.fitness import score_seed
 from tools.strategy_ga.seed_generator import case_memory_seed_pool
 from tools.strategy_json.schema import base_strategy_seed
 from tools.usdjpy_evidence_os.execution_feedback import build_execution_feedback
+from tools.usdjpy_evidence_os.io_utils import read_jsonl_tail
 from tools.usdjpy_evidence_os.parity import build_parity_report
 from tools.usdjpy_evidence_os.report import build_evidence_os
 from tools.usdjpy_evidence_os.telegram_gateway import (
@@ -25,6 +26,18 @@ from tools.usdjpy_strategy_backtest.report import ingest_klines, run_backtest
 
 
 class USDJPYEvidenceOSTests(unittest.TestCase):
+    def test_jsonl_tail_reads_only_latest_rows_in_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "large.jsonl"
+            path.write_text(
+                "\n".join(json.dumps({"idx": idx}) for idx in range(25)) + "\n",
+                encoding="utf-8",
+            )
+
+            rows = read_jsonl_tail(path, 4)
+
+            self.assertEqual([row["idx"] for row in rows], [21, 22, 23, 24])
+
     def test_agent_ops_health_reports_agent_loop_heartbeat(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime_dir = Path(tmp)
@@ -472,6 +485,47 @@ class USDJPYEvidenceOSTests(unittest.TestCase):
             self.assertEqual(report["metrics"]["liveLaneCheckedRows"], 1)
             self.assertEqual(report["metrics"]["liveLaneStrategyMismatchCount"], 0)
             self.assertEqual(report["recentFeedback"][0]["feedbackId"], "public-fill")
+
+    def test_execution_feedback_downgrades_spread_warning_when_ea_guard_blocks_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            (runtime_dir / "QuantGod_LiveExecutionFeedback.jsonl").write_text(
+                "\n".join(
+                    [
+                        '{"schema":"quantgod.live_execution_feedback.v1","feedbackId":"spread-fill","eventType":"ORDER_FILL","symbol":"USDJPYc","side":"BUY","policyId":"USDJPY_LIVE_LOOP","strategyId":"RSI_Reversal","intentId":"pilot-spread","expectedPrice":155.20,"fillPrice":155.21,"slippagePips":0.1,"spreadAtEntry":2.5,"latencyMs":110}',
+                        '{"schema":"quantgod.live_execution_feedback.v1","feedbackId":"spread-close","eventType":"ORDER_CLOSE","symbol":"USDJPYc","side":"SELL","policyId":"USDJPY_LIVE_LOOP","strategyId":"RSI_Reversal","intentId":"pilot-spread","expectedPrice":155.34,"fillPrice":155.34,"slippagePips":0,"spreadAtEntry":0,"latencyMs":0,"profitR":0.3,"mfeR":0.6,"maeR":-0.1,"exitReason":"TP"}',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (runtime_dir / "QuantGod_USDJPYRsiEntryDiagnostics.json").write_text(
+                """
+                {
+                  "schema": "quantgod.mt5.usdjpy_rsi_entry_diagnostics.v1",
+                  "state": "SPREAD_BLOCK",
+                  "guards": {
+                    "sessionOpen": true,
+                    "spreadAllowed": false,
+                    "spreadPips": 2.5,
+                    "maxSpreadPips": 2.0
+                  }
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            report = build_execution_feedback(runtime_dir, write=False)
+
+            self.assertEqual(report["metrics"]["spreadAnomalyCount"], 1)
+            self.assertTrue(report["metrics"]["spreadGuardCovered"])
+            self.assertEqual(report["promotionGate"]["status"], "PASS")
+            self.assertNotIn(
+                "SPREAD_AT_ENTRY",
+                {row["code"] for row in report["promotionGate"]["warnings"]},
+            )
+            spread_gate = next(row for row in report["qualityGates"] if row["name"] == "spread_at_entry")
+            self.assertEqual(spread_gate["status"], "PASS")
+            self.assertIn("EA 点差守门覆盖", spread_gate["reasonZh"])
 
     def test_dry_run_non_rsi_does_not_trigger_live_lane_strategy_lock(self):
         with tempfile.TemporaryDirectory() as tmp:

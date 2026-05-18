@@ -1,5 +1,7 @@
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -58,6 +60,35 @@ class USDJPYLiveLoopTests(unittest.TestCase):
             self.assertEqual(payload["state"], STATE_EVIDENCE_MISSING)
             self.assertFalse(payload["runtimeReady"])
             self.assertIn("缺少 USDJPY 运行快照", "；".join(payload["whyNoEntry"]))
+
+    def test_dashboard_snapshot_within_mt5_bridge_window_stays_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            runtime = Path(tmp) / "runtime"
+            write_ready_preset(root)
+            sample_runtime(runtime, overwrite=True)
+            (runtime / "QuantGod_MT5RuntimeSnapshot_USDJPYc.json").unlink()
+            dashboard = runtime / "QuantGod_Dashboard.json"
+            dashboard.write_text(
+                json.dumps({
+                    "timestamp": "2026.05.06 01:40:21",
+                    "watchlist": "USDJPYc",
+                    "runtime": {
+                        "tradeStatus": "READY",
+                        "executionEnabled": True,
+                        "readOnlyMode": False,
+                        "tickAgeSeconds": 2,
+                    },
+                    "market": {"bid": 157.762, "ask": 157.788, "spread": 2.6},
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            old_time = time.time() - 150
+            os.utime(dashboard, (old_time, old_time))
+            payload = build_live_loop(root, runtime, write=True)
+            self.assertEqual(payload["state"], STATE_READY)
+            self.assertTrue(payload["runtimeReady"])
+            self.assertNotIn("运行快照过旧", "；".join(payload["whyNoEntry"]))
 
     def test_written_daily_autopilot_is_chinese_operator_summary(self):
         with tempfile.TemporaryDirectory() as tmp:

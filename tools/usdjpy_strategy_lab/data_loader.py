@@ -77,7 +77,8 @@ def _dashboard_fastlane_fallback(runtime_dir: Path) -> Optional[Dict[str, Any]]:
     runtime = dashboard.get("runtime") if isinstance(dashboard.get("runtime"), dict) else {}
     age = to_float(dashboard.get("runtimeAgeSeconds"), 9999.0)
     tick_age = to_float(runtime.get("tickAgeSeconds"), 9999.0)
-    if not (bool(dashboard.get("runtimeFresh")) or age <= 30 or tick_age <= 30):
+    fresh_limit = runtime_fresh_limit_seconds()
+    if not (bool(dashboard.get("runtimeFresh")) or age <= fresh_limit or tick_age <= 30):
         return None
     return {
         "found": True,
@@ -101,6 +102,32 @@ def _empty_fastlane_exporter(payload: Dict[str, Any], focus: Optional[Dict[str, 
     row = focus if isinstance(focus, dict) else {}
     tick_rows = to_float(row.get("tickRows"), 0.0)
     return tick_rows <= 0 and row.get("tickAgeSeconds") in (None, "", "null") and row.get("indicatorAgeSeconds") in (None, "", "null")
+
+
+def _degraded_by_stale_fastlane_exporter(payload: Dict[str, Any], focus: Optional[Dict[str, Any]], quality: str) -> bool:
+    """Allow fresh EA Dashboard evidence to replace stale auxiliary fastlane output."""
+    pass_states = {"OK", "PASS", "PASSED", "GOOD", "HEALTHY", "FAST", "EA_DASHBOARD_OK"}
+    if quality in pass_states:
+        return False
+    row = focus if isinstance(focus, dict) else {}
+    if not row:
+        return False
+    failed_checks = {
+        str(check.get("name") or "")
+        for check in row.get("checks", [])
+        if isinstance(check, dict) and check.get("passed") is False
+    }
+    stale_exporter_checks = {"indicator_lane", "tick_fast_lane"}
+    if failed_checks and not failed_checks.issubset(stale_exporter_checks):
+        return False
+    tick_age = to_float(row.get("tickAgeSeconds"), 9999.0)
+    tick_rows = to_float(row.get("tickRows"), 0.0)
+    heartbeat_limit = to_float(payload.get("heartbeatFreshLimitSeconds"), 90.0)
+    heartbeat_age = to_float(payload.get("heartbeatAgeSeconds"), 0.0)
+    heartbeat_stale = payload.get("heartbeatFresh") is False or heartbeat_age > heartbeat_limit
+    indicator_stale = "indicator_lane" in failed_checks or to_float(row.get("indicatorAgeSeconds"), 0.0) > 30
+    tick_lane_stale = "tick_fast_lane" in failed_checks and tick_age <= 30
+    return tick_age <= 30 and tick_rows >= 1 and (heartbeat_stale or indicator_stale or tick_lane_stale)
 
 
 def read_all_csv(runtime_dir: Path, *names: str) -> List[Dict[str, Any]]:
@@ -133,6 +160,10 @@ def to_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def runtime_fresh_limit_seconds(default: float = 180.0) -> float:
+    return max(30.0, to_float(os.environ.get("QG_USDJPY_RUNTIME_FRESH_SECONDS"), default))
+
+
 def to_direction(value: Any) -> str:
     text = str(value or "").strip().upper()
     if text in {"BUY", "LONG", "1", "多", "买", "买入"}:
@@ -162,7 +193,7 @@ def focus_runtime_snapshot(runtime_dir: Path, symbol: str = FOCUS_SYMBOL) -> Opt
             payload.setdefault("symbol", payload.get("watchlist") or symbol)
             payload.setdefault("fallback", False)
             payload.setdefault("runtimeAgeSeconds", payload.get("_fileAgeSeconds", 9999))
-            payload.setdefault("runtimeFresh", float(payload.get("runtimeAgeSeconds", 9999)) <= 30)
+            payload.setdefault("runtimeFresh", float(payload.get("runtimeAgeSeconds", 9999)) <= runtime_fresh_limit_seconds())
             payload.setdefault("current_price", {
                 "bid": market.get("bid"),
                 "ask": market.get("ask"),
@@ -198,6 +229,10 @@ def fastlane_quality(runtime_dir: Path) -> Dict[str, Any]:
         if fallback:
             return fallback
     elif _empty_fastlane_exporter(payload, focus):
+        fallback = _dashboard_fastlane_fallback(runtime_dir)
+        if fallback:
+            return fallback
+    elif _degraded_by_stale_fastlane_exporter(payload, focus, quality):
         fallback = _dashboard_fastlane_fallback(runtime_dir)
         if fallback:
             return fallback

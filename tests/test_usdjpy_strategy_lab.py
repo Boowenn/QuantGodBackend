@@ -1,5 +1,7 @@
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -144,6 +146,33 @@ class USDJPYStrategyLabTests(unittest.TestCase):
             risk = build_risk_check(runtime)
             self.assertEqual(risk["status"], "PASS")
 
+    def test_minute_old_dashboard_snapshot_stays_fresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            dashboard = runtime / "QuantGod_Dashboard.json"
+            dashboard.write_text(
+                json.dumps({
+                    "timestamp": "2026.05.06 01:40:21",
+                    "watchlist": FOCUS_SYMBOL,
+                    "runtime": {
+                        "tradeStatus": "READY",
+                        "executionEnabled": True,
+                        "readOnlyMode": False,
+                        "tickAgeSeconds": 0,
+                    },
+                    "market": {"bid": 157.762, "ask": 157.788, "spread": 2.6},
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            old_time = time.time() - 60
+            os.utime(dashboard, (old_time, old_time))
+            snapshot = focus_runtime_snapshot(runtime)
+            self.assertIsNotNone(snapshot)
+            self.assertGreater(snapshot["runtimeAgeSeconds"], 30)
+            self.assertTrue(snapshot["runtimeFresh"])
+            risk = build_risk_check(runtime)
+            self.assertEqual(risk["status"], "PASS")
+
     def test_fastlane_fast_state_is_accepted_by_policy(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime = Path(tmp)
@@ -185,6 +214,47 @@ class USDJPYStrategyLabTests(unittest.TestCase):
                     "heartbeatFound": False,
                     "quality": "DEGRADED",
                     "symbols": [{"symbol": FOCUS_SYMBOL, "quality": "DEGRADED", "tickRows": 0, "tickAgeSeconds": None, "indicatorAgeSeconds": None}],
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            policy = build_usdjpy_policy(runtime)
+            self.assertTrue(policy["evidence"]["fastlaneOk"])
+            self.assertTrue(any("HFM EA Dashboard 新鲜快照" in "；".join(item["reasons"]) for item in policy["strategies"]))
+
+    def test_stale_degraded_fastlane_exporter_falls_back_to_fresh_dashboard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            sample_runtime(runtime, overwrite=True)
+            (runtime / "QuantGod_Dashboard.json").write_text(
+                json.dumps({
+                    "watchlist": FOCUS_SYMBOL,
+                    "runtime": {"tradeStatus": "READY", "executionEnabled": True, "readOnlyMode": False, "tickAgeSeconds": 2},
+                    "market": {"bid": 155.92, "ask": 155.95, "spread": 3.0},
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            quality_path = runtime / "quality" / "QuantGod_MT5FastLaneQuality.json"
+            quality_path.write_text(
+                json.dumps({
+                    "schema": "quantgod.mt5.fastlane.quality.v1",
+                    "heartbeatFound": True,
+                    "heartbeatFresh": False,
+                    "heartbeatAgeSeconds": 120,
+                    "heartbeatFreshLimitSeconds": 90,
+                    "quality": "DEGRADED",
+                    "symbols": [{
+                        "symbol": FOCUS_SYMBOL,
+                        "quality": "DEGRADED",
+                        "tickRows": 3,
+                        "tickAgeSeconds": 2,
+                        "indicatorAgeSeconds": 39,
+                        "checks": [
+                            {"name": "tick_fast_lane", "passed": False, "reason": "tick年龄=9秒"},
+                            {"name": "indicator_lane", "passed": False},
+                            {"name": "tick_rows", "passed": True},
+                            {"name": "spread", "passed": True},
+                        ],
+                    }],
                 }, ensure_ascii=False),
                 encoding="utf-8",
             )

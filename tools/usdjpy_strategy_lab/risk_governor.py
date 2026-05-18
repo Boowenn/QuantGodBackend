@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
-from .data_loader import fastlane_quality, focus_runtime_snapshot
+from .data_loader import fastlane_quality, focus_runtime_snapshot, runtime_fresh_limit_seconds
 from .schema import FOCUS_SYMBOL, READ_ONLY_SAFETY, assert_no_secret_or_execution_flags, utc_now_iso
 
 
@@ -17,7 +17,7 @@ def build_risk_check(runtime_dir: Path) -> Dict[str, Any]:
         blockers.append("运行快照处于 fallback")
     try:
         age = float(snapshot.get("runtimeAgeSeconds", 9999))
-        if age > 30:
+        if age > runtime_fresh_limit_seconds():
             blockers.append(f"运行快照过旧：{age:.0f}s")
     except Exception:
         blockers.append("运行快照年龄不可解析")

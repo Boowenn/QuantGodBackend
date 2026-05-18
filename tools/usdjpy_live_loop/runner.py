@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from tools.usdjpy_strategy_lab.data_loader import focus_runtime_snapshot
+    from tools.usdjpy_strategy_lab.data_loader import focus_runtime_snapshot, runtime_fresh_limit_seconds
     from tools.usdjpy_strategy_lab.dry_run_bridge import build_dry_run_decision
     from tools.usdjpy_strategy_lab.policy_builder import build_usdjpy_policy
 except ModuleNotFoundError:  # CLI execution from tools/
-    from usdjpy_strategy_lab.data_loader import focus_runtime_snapshot
+    from usdjpy_strategy_lab.data_loader import focus_runtime_snapshot, runtime_fresh_limit_seconds
     from usdjpy_strategy_lab.dry_run_bridge import build_dry_run_decision
     from usdjpy_strategy_lab.policy_builder import build_usdjpy_policy
 
@@ -73,7 +73,7 @@ def _runtime_status(runtime_dir: Path) -> dict[str, Any]:
     age = snapshot.get("runtimeAgeSeconds", snapshot.get("_fileAgeSeconds"))
     ready = bool(snapshot) and not bool(snapshot.get("fallback")) and snapshot.get("runtimeFresh") is not False
     try:
-        if age is not None and float(age) > 120:
+        if age is not None and float(age) > runtime_fresh_limit_seconds():
             ready = False
     except Exception:
         pass
