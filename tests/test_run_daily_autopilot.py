@@ -286,6 +286,8 @@ class DailyAutopilotTests(unittest.TestCase):
         self.assertIn("QuantGod_AgentV25HeavyTasksStatus.json", agent_loop)
         self.assertIn("maybe_start_heavy_tasks", agent_loop)
         self.assertIn("run_usdjpy_strategy_lab.py", agent_loop)
+        self.assertIn("run_mac_polymarket_readonly_cycle.sh", agent_loop)
+        self.assertIn("QG_POLYMARKET_HEAVY_DASHBOARD_DIR", agent_loop)
         self.assertIn("run_with_timeout", agent_loop)
         self.assertIn("telegramTimeoutSeconds", agent_loop)
         self.assertIn("run_mac_agent_v25_maintenance.py", agent_loop)
