@@ -40,6 +40,7 @@ DEFAULT_RSI: Dict[str, Any] = {
     "crossbackThreshold": 0.8,
     "maxCrossbackRsi": 100,
     "regimeFilter": {"mode": "OFF"},
+    "adverseExcursionGuard": {"mode": "OFF"},
 }
 
 DEFAULT_MA: Dict[str, Any] = {

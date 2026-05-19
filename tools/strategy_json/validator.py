@@ -63,6 +63,26 @@ def _check_rsi_regime_filter(config: Dict[str, Any]) -> Tuple[bool, str]:
     return True, ""
 
 
+def _check_rsi_adverse_excursion_guard(config: Dict[str, Any]) -> Tuple[bool, str]:
+    mode = str(config.get("mode") or "OFF").upper()
+    if mode not in {"OFF", "NONE", "P4_10G_RSI_ADVERSE_EXCURSION"}:
+        return False, "RSI adverseExcursionGuard mode 不合法"
+    if mode in {"OFF", "NONE"}:
+        return True, ""
+    checks = [
+        _check_range("RSI adverseExcursionGuard lookaheadBars", config.get("lookaheadBars", 2), 1, 8),
+        _check_range("RSI adverseExcursionGuard maxEarlyAdverseR", config.get("maxEarlyAdverseR", 0.8), 0.2, 2.0),
+        _check_range("RSI adverseExcursionGuard confirmationBars", config.get("confirmationBars", 2), 1, 8),
+        _check_range("RSI adverseExcursionGuard minConfirmR", config.get("minConfirmR", 0.05), -0.5, 1.5),
+        _check_range("RSI adverseExcursionGuard rangeLookbackBars", config.get("rangeLookbackBars", 4), 1, 24),
+        _check_range("RSI adverseExcursionGuard maxEntryRangePips", config.get("maxEntryRangePips", 60), 1, 240),
+    ]
+    for ok, reason in checks:
+        if not ok:
+            return ok, reason
+    return True, ""
+
+
 def _check_entry_event_filter(config: Dict[str, Any]) -> Tuple[bool, str]:
     mode = str(config.get("mode") or "OFF").upper()
     if mode not in {"OFF", "NONE", "P4_10E_RSI_AVOID_KNOWN_EVENT_RISK"}:
@@ -130,6 +150,9 @@ def validate_strategy_json(seed: Dict[str, Any]) -> Dict[str, Any]:
         _check_range("RSI crossbackThreshold", rsi.get("crossbackThreshold"), 0, 3),
         _check_range("RSI maxCrossbackRsi", rsi.get("maxCrossbackRsi", 100), 20, 100),
         _check_rsi_regime_filter(rsi.get("regimeFilter") if isinstance(rsi.get("regimeFilter"), dict) else {}),
+        _check_rsi_adverse_excursion_guard(
+            rsi.get("adverseExcursionGuard") if isinstance(rsi.get("adverseExcursionGuard"), dict) else {}
+        ),
         _check_entry_event_filter(entry.get("eventFilter") if isinstance(entry.get("eventFilter"), dict) else {}),
         _check_timeframe("MA", ma.get("timeframe")),
         _check_range("MA fastPeriod", ma.get("fastPeriod"), 2, 80),

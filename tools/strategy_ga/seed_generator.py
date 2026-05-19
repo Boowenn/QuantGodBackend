@@ -36,6 +36,7 @@ P4_10D_RSI_FOCUS_BLOCKERS = {
     "OVERFIT_RISK",
     "OVERFIT_RISK_HIGH",
     "RSI_MIN_TRADE_GATE",
+    "MAX_ADVERSE_TOO_HIGH",
     "WALK_FORWARD_UNSTABLE",
     "WALK_FORWARD_INSUFFICIENT",
     "INSUFFICIENT_SAMPLES",
@@ -403,6 +404,31 @@ def _is_p4_10f_rsi_segment_overfit_row(row: Dict[str, Any]) -> bool:
     )
 
 
+def _is_p4_10g_rsi_adverse_row(row: Dict[str, Any]) -> bool:
+    if _row_family(row) != "RSI_Reversal":
+        return False
+    seed = row.get("strategyJson") if isinstance(row.get("strategyJson"), dict) else {}
+    if str(seed.get("direction") or row.get("direction") or "").upper() != "LONG":
+        return False
+    if str(row.get("blockerCode") or "") != "MAX_ADVERSE_TOO_HIGH":
+        return False
+    breakdown = row.get("fitnessBreakdown") if isinstance(row.get("fitnessBreakdown"), dict) else {}
+    backtest = breakdown.get("strategyBacktest") if isinstance(breakdown.get("strategyBacktest"), dict) else {}
+    walk_forward = breakdown.get("walkForward") if isinstance(breakdown.get("walkForward"), dict) else {}
+    summary = walk_forward.get("summary") if isinstance(walk_forward.get("summary"), dict) else {}
+    sample_count = int(_num(breakdown.get("sampleCount"), 0))
+    trade_count = int(_num(backtest.get("tradeCount"), 0))
+    effective_count = max(sample_count, trade_count)
+    net_r = _num(backtest.get("netR"), _num(breakdown.get("netR"), 0.0))
+    return (
+        net_r > 0
+        and 18 <= effective_count <= 60
+        and str(summary.get("promotionGateStatus") or "") == "PASS"
+        and _num(summary.get("validationNetR"), 0.0) > 0
+        and _num(summary.get("forwardNetR"), 0.0) > 0
+    )
+
+
 def _rsi_focus_sort_key(row: Dict[str, Any]) -> tuple:
     breakdown = row.get("fitnessBreakdown") if isinstance(row.get("fitnessBreakdown"), dict) else {}
     backtest = breakdown.get("strategyBacktest") if isinstance(breakdown.get("strategyBacktest"), dict) else {}
@@ -411,7 +437,7 @@ def _rsi_focus_sort_key(row: Dict[str, Any]) -> tuple:
     sample_count = int(_num(breakdown.get("sampleCount"), 0))
     trade_count = int(_num(backtest.get("tradeCount"), 0))
     blocker = str(row.get("blockerCode") or "")
-    segment_priority = 2 if _is_p4_10f_rsi_segment_overfit_row(row) else (
+    segment_priority = 3 if _is_p4_10g_rsi_adverse_row(row) else 2 if _is_p4_10f_rsi_segment_overfit_row(row) else (
         1 if blocker in {"OVERFIT_RISK", "OVERFIT_RISK_HIGH", "RSI_MIN_TRADE_GATE"} else 0
     )
     return (
@@ -491,7 +517,15 @@ def _repair_profiles_for_row(row: Dict[str, Any]) -> List[str]:
                 "BB_SHORT_RECLAIM_WIDE_BAND",
             ]
     elif family == "RSI_Reversal" and blocker in QUALITY_REPAIR_BLOCKERS:
-        if _is_p4_10f_rsi_segment_overfit_row(row):
+        if _is_p4_10g_rsi_adverse_row(row):
+            family_profiles = [
+                "RSI_REVERSAL_ADVERSE_EXCURSION_CLOSURE",
+                "RSI_REVERSAL_EARLY_KILL_SWITCH",
+                "RSI_REVERSAL_VOLATILITY_CAP",
+                "RSI_REVERSAL_FORWARD_DRAWDOWN_CLIPPER",
+                "RSI_REVERSAL_SEGMENT_OVERFIT_CLOSURE",
+            ]
+        elif _is_p4_10f_rsi_segment_overfit_row(row):
             family_profiles = [
                 "RSI_REVERSAL_SEGMENT_OVERFIT_CLOSURE",
                 "RSI_REVERSAL_FORWARD_DRAWDOWN_CLIPPER",
@@ -744,7 +778,46 @@ def _apply_rsi_reversal_profile(seed: Dict[str, Any], profile: str, offset: int)
     exit_cfg = seed.setdefault("exit", {})
     risk = seed.setdefault("risk", {})
     direction = str(seed.get("direction") or "LONG").upper()
-    if profile == "RSI_REVERSAL_SEGMENT_OVERFIT_CLOSURE":
+    if profile == "RSI_REVERSAL_ADVERSE_EXCURSION_CLOSURE":
+        _apply_p4_10g_rsi_adverse_guard(seed, offset, "closure")
+        rsi["timeframe"] = "H1"
+        rsi["period"] = [21, 22, 22][offset % 3]
+        rsi["buyBand"] = [28, 29, 29][offset % 3]
+        rsi["crossbackThreshold"] = [0.75, 0.85, 0.95][offset % 3]
+        rsi["maxCrossbackRsi"] = [34.5, 35.0, 35.5][offset % 3]
+        _set_exit(seed, hold_h1=[2, 3, 3][offset % 3], hold_m15=[3, 4, 4][offset % 3])
+        exit_cfg["trailStartR"] = [0.50, 0.60, 0.70][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.28, 0.32, 0.36][offset % 3]
+        exit_cfg["breakevenDelayR"] = [0.15, 0.20, 0.30][offset % 3]
+        risk["riskPips"] = max([20.0, 21.0, 22.0][offset % 3], _num(risk.get("riskPips"), 10.0))
+        risk["opportunityLotMultiplier"] = min(0.22, _num(risk.get("opportunityLotMultiplier"), 0.35))
+    elif profile == "RSI_REVERSAL_EARLY_KILL_SWITCH":
+        _apply_p4_10g_rsi_adverse_guard(seed, offset, "early")
+        rsi["timeframe"] = "H1"
+        rsi["period"] = [21, 21, 22][offset % 3]
+        rsi["buyBand"] = [28, 28, 29][offset % 3]
+        rsi["crossbackThreshold"] = [0.80, 0.90, 1.00][offset % 3]
+        rsi["maxCrossbackRsi"] = [33.5, 34.0, 34.5][offset % 3]
+        _set_exit(seed, hold_h1=[2, 2, 3][offset % 3], hold_m15=[3, 3, 4][offset % 3])
+        exit_cfg["trailStartR"] = [0.45, 0.55, 0.65][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.25, 0.30, 0.34][offset % 3]
+        exit_cfg["breakevenDelayR"] = [0.10, 0.15, 0.25][offset % 3]
+        risk["riskPips"] = max([20.0, 22.0, 24.0][offset % 3], _num(risk.get("riskPips"), 10.0))
+        risk["opportunityLotMultiplier"] = min(0.20, _num(risk.get("opportunityLotMultiplier"), 0.35))
+    elif profile == "RSI_REVERSAL_VOLATILITY_CAP":
+        _apply_p4_10g_rsi_adverse_guard(seed, offset, "volatility")
+        rsi["timeframe"] = "H1"
+        rsi["period"] = [22, 23, 24][offset % 3]
+        rsi["buyBand"] = [27, 28, 29][offset % 3]
+        rsi["crossbackThreshold"] = [0.70, 0.80, 0.90][offset % 3]
+        rsi["maxCrossbackRsi"] = [35.0, 35.5, 36.0][offset % 3]
+        _set_exit(seed, hold_h1=[3, 3, 4][offset % 3], hold_m15=[4, 5, 5][offset % 3])
+        exit_cfg["trailStartR"] = [0.60, 0.70, 0.80][offset % 3]
+        exit_cfg["mfeGivebackPct"] = [0.32, 0.36, 0.40][offset % 3]
+        exit_cfg["breakevenDelayR"] = [0.20, 0.30, 0.40][offset % 3]
+        risk["riskPips"] = max([19.0, 20.0, 21.0][offset % 3], _num(risk.get("riskPips"), 10.0))
+        risk["opportunityLotMultiplier"] = min(0.24, _num(risk.get("opportunityLotMultiplier"), 0.35))
+    elif profile == "RSI_REVERSAL_SEGMENT_OVERFIT_CLOSURE":
         _apply_p4_10f_rsi_segment_filter(seed, offset, "closure")
         rsi["timeframe"] = "H1"
         rsi["period"] = [21, 21, 22][offset % 3]
@@ -933,6 +1006,48 @@ def _apply_p4_10f_rsi_segment_filter(seed: Dict[str, Any], offset: int, variant:
     entry = seed.setdefault("entry", {})
     conditions = entry.get("conditions") if isinstance(entry.get("conditions"), list) else []
     condition = "rsi.segmentOverfitClosure == true"
+    if condition not in conditions:
+        conditions.append(condition)
+    entry["conditions"] = conditions
+
+
+def _apply_p4_10g_rsi_adverse_guard(seed: Dict[str, Any], offset: int, variant: str) -> None:
+    _apply_p4_10f_rsi_segment_filter(seed, offset, "forward" if variant == "early" else "closure")
+    rsi = seed.setdefault("indicators", {}).setdefault("rsi", {})
+    if variant == "early":
+        guard = {
+            "mode": "P4_10G_RSI_ADVERSE_EXCURSION",
+            "lookaheadBars": [1, 2, 2][offset % 3],
+            "maxEarlyAdverseR": [0.58, 0.64, 0.70][offset % 3],
+            "confirmationBars": [1, 1, 2][offset % 3],
+            "minConfirmR": [0.04, 0.06, 0.08][offset % 3],
+            "rangeLookbackBars": [3, 4, 4][offset % 3],
+            "maxEntryRangePips": [44, 48, 52][offset % 3],
+        }
+    elif variant == "volatility":
+        guard = {
+            "mode": "P4_10G_RSI_ADVERSE_EXCURSION",
+            "lookaheadBars": [2, 2, 3][offset % 3],
+            "maxEarlyAdverseR": [0.78, 0.84, 0.90][offset % 3],
+            "confirmationBars": [2, 2, 3][offset % 3],
+            "minConfirmR": [0.06, 0.08, 0.10][offset % 3],
+            "rangeLookbackBars": [4, 5, 6][offset % 3],
+            "maxEntryRangePips": [34, 38, 42][offset % 3],
+        }
+    else:
+        guard = {
+            "mode": "P4_10G_RSI_ADVERSE_EXCURSION",
+            "lookaheadBars": [2, 2, 3][offset % 3],
+            "maxEarlyAdverseR": [0.68, 0.74, 0.80][offset % 3],
+            "confirmationBars": [1, 2, 2][offset % 3],
+            "minConfirmR": [0.05, 0.08, 0.11][offset % 3],
+            "rangeLookbackBars": [3, 4, 5][offset % 3],
+            "maxEntryRangePips": [42, 48, 54][offset % 3],
+        }
+    rsi["adverseExcursionGuard"] = guard
+    entry = seed.setdefault("entry", {})
+    conditions = entry.get("conditions") if isinstance(entry.get("conditions"), list) else []
+    condition = "rsi.adverseExcursionGuard == P4_10G_RSI_ADVERSE_EXCURSION"
     if condition not in conditions:
         conditions.append(condition)
     entry["conditions"] = conditions
@@ -1148,6 +1263,12 @@ def _enforce_shadow_safety(seed: Dict[str, Any]) -> None:
 
 
 def _repair_reason_zh(blocker: str, profile: str) -> str:
+    if profile.startswith("RSI_REVERSAL_ADVERSE_EXCURSION"):
+        return "P4-10G 针对 RSI 最大逆行过高，加入早期 adverse kill、确认超时和波动上限。"
+    if profile.startswith("RSI_REVERSAL_EARLY_KILL"):
+        return "P4-10G 针对 RSI 入场后早期反向路径，优先测试更快的 adverse excursion kill-switch。"
+    if profile.startswith("RSI_REVERSAL_VOLATILITY_CAP"):
+        return "P4-10G 针对 RSI 高波动入场回撤，限制入场前平均 range 并保留分段稳定约束。"
     if profile.startswith("RSI_REVERSAL_SEGMENT_OVERFIT"):
         return "P4-10F 针对 RSI train / validation / forward 分段过拟合，收紧反弹追价并提前保护盈利。"
     if profile.startswith("RSI_REVERSAL_FORWARD_DRAWDOWN"):

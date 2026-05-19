@@ -160,6 +160,7 @@ def _rsi_signals(strategy: Dict[str, Any], bars: List[Bar]) -> List[Dict[str, An
     sell_band = float(rsi_cfg.get("sellBand", max(55.0, 100.0 - buy_band)))
     crossback_threshold = float(rsi_cfg.get("crossbackThreshold", 0.8))
     max_crossback_rsi = _float_param(rsi_cfg, "maxCrossbackRsi", 100.0, 20.0, 100.0)
+    adverse_guard = _rsi_adverse_guard_cfg(strategy)
 
     closes = [item.close for item in bars]
     rsi_series = rsi_values(closes, period)
@@ -187,12 +188,19 @@ def _rsi_signals(strategy: Dict[str, Any], bars: List[Bar]) -> List[Dict[str, An
             if not regime.get("allowed", True):
                 index += 1
                 continue
+            volatility = _rsi_entry_volatility_decision(bars, index, adverse_guard)
+            if not volatility.get("allowed", True):
+                index += 1
+                continue
             evidence = {"rsi": round(current_rsi, 4)}
             if regime.get("enabled"):
                 evidence["regimeFilter"] = regime.get("mode")
                 evidence["fastMinusSlowPips"] = regime.get("fastMinusSlowPips")
                 evidence["distanceFromSlowPips"] = regime.get("distanceFromSlowPips")
                 evidence["slowSlopePips"] = regime.get("slowSlopePips")
+            if volatility.get("enabled"):
+                evidence["adverseExcursionGuard"] = adverse_guard.get("mode")
+                evidence["entryRangePips"] = volatility.get("entryRangePips")
             signals.append(_signal(index + 1, direction, "RSI_CROSSBACK", evidence))
             index += 3
         else:
@@ -643,6 +651,40 @@ def _event_filter_blocks(news_decision: Dict[str, Any], event_filter: Dict[str, 
     return False
 
 
+def _rsi_adverse_guard_cfg(strategy: Dict[str, Any]) -> Dict[str, Any]:
+    if str(strategy.get("strategyFamily") or "") != "RSI_Reversal":
+        return {}
+    rsi = ((strategy.get("indicators") or {}).get("rsi") or {})
+    config = rsi.get("adverseExcursionGuard") if isinstance(rsi.get("adverseExcursionGuard"), dict) else {}
+    mode = str(config.get("mode") or "OFF").upper()
+    if mode in {"", "OFF", "NONE"}:
+        return {}
+    return config
+
+
+def _rsi_entry_volatility_decision(bars: List[Bar], index: int, guard_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    if not guard_cfg:
+        return {"enabled": False, "allowed": True}
+    lookback = _int_param(guard_cfg, "rangeLookbackBars", 4, 1, 24)
+    max_range_pips = _float_param(guard_cfg, "maxEntryRangePips", 60.0, 1.0, 240.0)
+    entry_range_pips = _recent_average_range_pips(bars, index, lookback)
+    return {
+        "enabled": True,
+        "allowed": entry_range_pips <= max_range_pips,
+        "entryRangePips": round(entry_range_pips, 2),
+        "maxEntryRangePips": round(max_range_pips, 2),
+    }
+
+
+def _recent_average_range_pips(bars: List[Bar], index: int, lookback: int) -> float:
+    pip_size = 0.01
+    start = max(0, index - max(1, lookback) + 1)
+    window = bars[start : index + 1]
+    if not window:
+        return 0.0
+    return sum(max(0.0, float(item.high) - float(item.low)) / pip_size for item in window) / len(window)
+
+
 def _simulate_exit(
     strategy: Dict[str, Any],
     bars: List[Bar],
@@ -668,15 +710,28 @@ def _simulate_exit(
     exit_bar = entry
     exit_price = entry.close
     exit_reason = "TIME_STOP"
+    adverse_guard = _rsi_adverse_guard_cfg(strategy)
     last_index = min(len(bars) - 1, entry_index + max(1, hold_bars))
     for index in range(entry_index, last_index + 1):
         bar = bars[index]
+        elapsed_bars = index - entry_index
         high_profit = signed * (bar.high - entry_price) / pip_size
         low_profit = signed * (bar.low - entry_price) / pip_size
         if direction == "SHORT":
             high_profit, low_profit = low_profit, high_profit
         max_profit_pips = max(max_profit_pips, high_profit)
         max_loss_pips = min(max_loss_pips, low_profit)
+        if adverse_guard and elapsed_bars <= _int_param(adverse_guard, "lookaheadBars", 2, 1, 8):
+            adverse_limit_r = _float_param(adverse_guard, "maxEarlyAdverseR", 0.8, 0.2, 2.0)
+            guard_price = entry_price - signed * (adverse_limit_r * risk_price)
+            guard_hit = bar.low <= guard_price if direction == "LONG" else bar.high >= guard_price
+            if guard_hit:
+                exit_bar = bar
+                exit_price = guard_price
+                exit_reason = "RSI_EARLY_ADVERSE_KILL"
+                max_loss_pips = max(max_loss_pips, -adverse_limit_r * risk_pips)
+                last_index = index
+                break
         stop_hit = bar.low <= stop_price if direction == "LONG" else bar.high >= stop_price
         if stop_hit:
             exit_bar = bar
@@ -684,6 +739,15 @@ def _simulate_exit(
             exit_reason = "STOP_LOSS"
             last_index = index
             break
+        if adverse_guard and elapsed_bars >= _int_param(adverse_guard, "confirmationBars", 2, 1, 8):
+            min_confirm_r = _float_param(adverse_guard, "minConfirmR", 0.05, -0.5, 1.5)
+            current_profit_pips = signed * (bar.close - entry_price) / pip_size
+            if max_profit_pips / risk_pips < min_confirm_r and current_profit_pips <= 0:
+                exit_bar = bar
+                exit_price = bar.close
+                exit_reason = "RSI_CONFIRMATION_TIMEOUT"
+                last_index = index
+                break
         if max_profit_pips / risk_pips >= trail_start_r:
             giveback_stop = entry_price + signed * (max_profit_pips * (1.0 - giveback_pct) * pip_size)
             giveback_hit = bar.low <= giveback_stop if direction == "LONG" else bar.high >= giveback_stop
@@ -755,6 +819,9 @@ def _parity_vector(strategy: Dict[str, Any], bars: List[Bar], signals: List[Dict
             "crossbackThreshold": rsi_cfg.get("crossbackThreshold"),
             "maxCrossbackRsi": rsi_cfg.get("maxCrossbackRsi"),
             "regimeFilter": rsi_cfg.get("regimeFilter") if isinstance(rsi_cfg.get("regimeFilter"), dict) else {},
+            "adverseExcursionGuard": (
+                rsi_cfg.get("adverseExcursionGuard") if isinstance(rsi_cfg.get("adverseExcursionGuard"), dict) else {}
+            ),
         },
         "familyParameters": {
             "ma": indicators.get("ma") if isinstance(indicators.get("ma"), dict) else {},

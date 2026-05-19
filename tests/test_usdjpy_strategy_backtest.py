@@ -15,10 +15,11 @@ from tools.strategy_ga.seed_generator import exploration_seed_pool, quality_repa
 from tools.strategy_json.fingerprint import strategy_fingerprint
 from tools.strategy_json.schema import base_strategy_seed
 from tools.strategy_json.validator import validate_strategy_json
+from tools.usdjpy_strategy_backtest.cost_model import BacktestCostModel
 from tools.usdjpy_strategy_backtest.history_sync import build_history_production_status, sync_historical_klines
 from tools.usdjpy_strategy_backtest.historical_news import classify_historical_news, load_historical_news_events
 from tools.usdjpy_strategy_backtest.report import build_sample, run_backtest, status
-from tools.usdjpy_strategy_backtest.strategy_runner import _event_filter_blocks, _rsi_regime_decision
+from tools.usdjpy_strategy_backtest.strategy_runner import _event_filter_blocks, _rsi_regime_decision, _simulate_exit
 from tools.usdjpy_strategy_backtest.schema import (
     backtest_cache_path,
     equity_path,
@@ -812,6 +813,99 @@ class USDJPYStrategyBacktestTests(unittest.TestCase):
         self.assertGreater(score["rsiSegmentOverfitPenalty"], 0)
         self.assertLess(score["overfitPenalty"], 0.2)
         self.assertIsNone(score["blockerCode"])
+
+    def test_p4_10g_rsi_max_adverse_repair_adds_path_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            ga_dir = runtime_dir / "ga"
+            ga_dir.mkdir(parents=True)
+            parent = base_strategy_seed("PARENT-RSI-MAE", family="RSI_Reversal", direction="LONG")
+            parent["indicators"]["rsi"]["regimeFilter"] = {
+                "mode": "P4_10E_RSI_BEARISH_STRETCH",
+                "allowedHoursUtc": [0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+                "emaFastPeriod": 20,
+                "emaSlowPeriod": 50,
+                "slopeLookbackBars": 3,
+                "minFastMinusSlowPips": -260,
+                "maxFastMinusSlowPips": -6,
+                "minDistanceFromSlowPips": -280,
+                "maxDistanceFromSlowPips": -45,
+                "minSlowSlopePips": -50,
+                "maxSlowSlopePips": -4,
+            }
+            row = {
+                "generation": 69,
+                "rank": 1,
+                "fitness": 3.6248,
+                "blockerCode": "MAX_ADVERSE_TOO_HIGH",
+                "strategyJson": parent,
+                "fitnessBreakdown": {
+                    "sampleCount": 21,
+                    "maxAdverseR": -1.82,
+                    "strategyBacktest": {"netR": 4.353, "tradeCount": 18},
+                    "walkForward": {
+                        "summary": {
+                            "promotionGateStatus": "PASS",
+                            "stabilityScore": 0.9421,
+                            "trainNetR": 3.7799,
+                            "validationNetR": 1.6302,
+                            "forwardNetR": 1.189,
+                            "overfitPenalty": 0.0176,
+                            "sampleCount": 21,
+                        }
+                    },
+                },
+            }
+            (ga_dir / "QuantGod_GACandidateRuns.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            repair = quality_repair_seed_pool(runtime_dir, generation_number=70, limit=3)[0]
+            rsi = repair["indicators"]["rsi"]
+            guard = rsi["adverseExcursionGuard"]
+
+            self.assertEqual(repair["qualityProfile"], "RSI_REVERSAL_ADVERSE_EXCURSION_CLOSURE")
+            self.assertEqual(repair["repairTargetBlocker"], "MAX_ADVERSE_TOO_HIGH")
+            self.assertEqual(guard["mode"], "P4_10G_RSI_ADVERSE_EXCURSION")
+            self.assertLessEqual(guard["maxEarlyAdverseR"], 0.8)
+            self.assertLessEqual(rsi["maxCrossbackRsi"], 35.5)
+            self.assertIn("rsi.adverseExcursionGuard == P4_10G_RSI_ADVERSE_EXCURSION", repair["entry"]["conditions"])
+            self.assertTrue(validate_strategy_json(repair)["valid"])
+
+    def test_p4_10g_rsi_adverse_guard_caps_early_mae(self):
+        strategy = base_strategy_seed("RSI-ADVERSE-GUARD", family="RSI_Reversal", direction="LONG")
+        strategy["indicators"]["rsi"]["adverseExcursionGuard"] = {
+            "mode": "P4_10G_RSI_ADVERSE_EXCURSION",
+            "lookaheadBars": 2,
+            "maxEarlyAdverseR": 0.6,
+            "confirmationBars": 2,
+            "minConfirmR": 0.05,
+            "rangeLookbackBars": 3,
+            "maxEntryRangePips": 80,
+        }
+        bars = [
+            Bar("2026-01-01T00:00:00Z", 150.0, 150.02, 149.80, 149.85, 1000, 0),
+            Bar("2026-01-01T01:00:00Z", 149.85, 149.90, 149.70, 149.80, 1000, 0),
+            Bar("2026-01-01T02:00:00Z", 149.80, 150.05, 149.75, 150.00, 1000, 0),
+        ]
+
+        trade, exit_index = _simulate_exit(
+            strategy,
+            bars,
+            entry_index=0,
+            direction="LONG",
+            hold_bars=3,
+            risk_pips=20.0,
+            trail_start_r=1.5,
+            giveback_pct=0.6,
+            trade_no=1,
+            signal={"reason": "RSI_CROSSBACK", "evidence": {}},
+            cost_model=BacktestCostModel(spread_pips=0, slippage_pips=0, dynamic_spread_from_bars=False),
+            news_decision={"lotMultiplier": 1.0},
+        )
+
+        self.assertEqual(exit_index, 0)
+        self.assertEqual(trade["exitReason"], "RSI_EARLY_ADVERSE_KILL")
+        self.assertEqual(trade["maeR"], -0.6)
+        self.assertGreater(trade["rawProfitR"], -1.0)
 
     def test_history_sync_pulls_incremental_usdjpy_bars_from_mt5(self):
         class FakeMT5(types.SimpleNamespace):
