@@ -907,6 +907,63 @@ class USDJPYStrategyBacktestTests(unittest.TestCase):
         self.assertEqual(trade["maeR"], -0.6)
         self.assertGreater(trade["rawProfitR"], -1.0)
 
+    def test_p4_10h_guarded_rsi_sample_recovery_keeps_adverse_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime_dir = Path(tmp)
+            ga_dir = runtime_dir / "ga"
+            ga_dir.mkdir(parents=True)
+            parent = base_strategy_seed("PARENT-RSI-GUARDED-SAMPLE", family="RSI_Reversal", direction="LONG")
+            parent["indicators"]["rsi"]["adverseExcursionGuard"] = {
+                "mode": "P4_10G_RSI_ADVERSE_EXCURSION",
+                "lookaheadBars": 2,
+                "maxEarlyAdverseR": 0.68,
+                "confirmationBars": 1,
+                "minConfirmR": 0.05,
+                "rangeLookbackBars": 3,
+                "maxEntryRangePips": 42,
+            }
+            row = {
+                "generation": 73,
+                "rank": 1,
+                "fitness": 1.5375,
+                "blockerCode": "RSI_MIN_TRADE_GATE",
+                "strategyJson": parent,
+                "fitnessBreakdown": {
+                    "sampleCount": 12,
+                    "maxAdverseR": -0.68,
+                    "strategyBacktest": {"netR": 5.8484, "tradeCount": 11},
+                    "walkForward": {
+                        "summary": {
+                            "promotionGateStatus": "PASS",
+                            "stabilityScore": 1.0,
+                            "trainNetR": 3.8,
+                            "validationNetR": 1.3044,
+                            "forwardNetR": 1.6488,
+                            "overfitPenalty": 0.25,
+                            "sampleCount": 12,
+                        }
+                    },
+                },
+            }
+            (ga_dir / "QuantGod_GACandidateRuns.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+            repairs = quality_repair_seed_pool(runtime_dir, generation_number=74, limit=4)
+            profiles = {seed["qualityProfile"] for seed in repairs}
+            recovery = repairs[0]
+            guarded_gate = next(seed for seed in repairs if seed["qualityProfile"] == "RSI_REVERSAL_GUARDED_20_TRADE_BALANCER")
+            recovery_guard = recovery["indicators"]["rsi"]["adverseExcursionGuard"]
+            gate_guard = guarded_gate["indicators"]["rsi"]["adverseExcursionGuard"]
+
+            self.assertEqual(recovery["qualityProfile"], "RSI_REVERSAL_GUARDED_SAMPLE_RECOVERY")
+            self.assertIn("RSI_REVERSAL_GUARDED_20_TRADE_BALANCER", profiles)
+            self.assertEqual(recovery["repairTargetBlocker"], "RSI_MIN_TRADE_GATE")
+            self.assertEqual(recovery_guard["mode"], "P4_10G_RSI_ADVERSE_EXCURSION")
+            self.assertGreater(recovery_guard["maxEntryRangePips"], 42)
+            self.assertGreaterEqual(gate_guard["maxEarlyAdverseR"], 0.82)
+            self.assertIn("rsi.guardedSampleRecovery == true", recovery["entry"]["conditions"])
+            self.assertTrue(validate_strategy_json(recovery)["valid"])
+            self.assertTrue(validate_strategy_json(guarded_gate)["valid"])
+
     def test_history_sync_pulls_incremental_usdjpy_bars_from_mt5(self):
         class FakeMT5(types.SimpleNamespace):
             TIMEFRAME_M1 = "M1"
