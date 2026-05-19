@@ -9,6 +9,8 @@ EXECUTION_FEEDBACK_COVERAGE = "QuantGod_LiveExecutionFeedbackCoverage.json"
 GA_STABILITY_REPORT = "QuantGod_GAMultiGenerationStabilityReport.json"
 PRODUCTION_BURN_IN_REPORT = "QuantGod_ProductionBurnInReport.json"
 PRODUCTION_BURN_IN_LEDGER = "QuantGod_ProductionBurnInLedger.csv"
+RSI_LINEAGE_CLOSURE_REPORT = "QuantGod_RSILineageClosureReport.json"
+RSI_FROZEN_ELITE_LINEAGE = "QuantGod_RSIFrozenEliteLineage.json"
 
 REQUIRED_STRATEGY_FAMILIES = [
     "RSI_Reversal",

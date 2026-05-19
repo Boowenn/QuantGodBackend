@@ -8,6 +8,10 @@ from typing import Any
 
 from production_evidence_validation.burn_in import build_burn_in_report, load_latest_burn_in
 from production_evidence_validation.report import build_report, load_latest, write_reports
+from production_evidence_validation.rsi_lineage_closure import (
+    build_rsi_lineage_closure,
+    load_latest_rsi_lineage_closure,
+)
 from production_evidence_validation.telegram_text import build_telegram_text
 
 
@@ -65,6 +69,15 @@ def command_burn_in(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_rsi_lineage_closure(args: argparse.Namespace) -> int:
+    runtime_dir = runtime_dir_from_args(args)
+    report = load_latest_rsi_lineage_closure(runtime_dir) if not args.refresh and not args.write else None
+    if report is None:
+        report = build_rsi_lineage_closure(runtime_dir, write=args.write)
+    emit({"ok": True, "runtimeDir": str(runtime_dir), "report": report})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="P4-6 Production Evidence Validation")
     parser.add_argument("--runtime-dir", default=None)
@@ -87,6 +100,10 @@ def build_parser() -> argparse.ArgumentParser:
     burn_in.add_argument("--sample-interval-minutes", type=int, default=5)
     burn_in.add_argument("--max-stale-minutes", type=int, default=15)
     burn_in.set_defaults(func=command_burn_in)
+    rsi = sub.add_parser("rsi-lineage-closure")
+    rsi.add_argument("--refresh", action="store_true")
+    rsi.add_argument("--write", action="store_true")
+    rsi.set_defaults(func=command_rsi_lineage_closure)
     return parser
 
 

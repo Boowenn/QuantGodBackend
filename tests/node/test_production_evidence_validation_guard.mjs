@@ -12,6 +12,7 @@ const files = [
   'tools/production_evidence_validation/execution_feedback_audit.py',
   'tools/production_evidence_validation/source_attribution.py',
   'tools/production_evidence_validation/ga_audit.py',
+  'tools/production_evidence_validation/rsi_lineage_closure.py',
   'tools/production_evidence_validation/burn_in.py',
   'tools/production_evidence_validation/report.py',
   'tools/production_evidence_validation/telegram_text.py',
@@ -47,6 +48,24 @@ test('P4-9 exposes burn-in and source attribution markers', () => {
   for (const tier of ['live_real_fill', 'mt5_close_history', 'ea_shadow', 'strategy_shadow', 'backfilled_history']) {
     assert.ok(attribution.includes(tier), `missing source tier ${tier}`);
   }
+});
+
+test('P4-10I exposes guarded RSI lineage closure markers', () => {
+  const text = readFileSync('tools/production_evidence_validation/rsi_lineage_closure.py', 'utf8');
+  const runner = readFileSync('tools/run_production_evidence_validation.py', 'utf8');
+  const report = readFileSync('tools/production_evidence_validation/report.py', 'utf8');
+  const route = readFileSync('Dashboard/production_evidence_validation_api_routes.js', 'utf8');
+  for (const marker of [
+    'P4_10I_RSI_STABILITY_LINEAGE_CLOSED',
+    'RSI_REVERSAL_GUARDED_SAMPLE_RECOVERY',
+    'READY_FOR_TESTER_ONLY_SHADOW_PROMOTION',
+    'RSI_FROZEN_ELITE_LINEAGE',
+  ]) {
+    assert.ok(text.includes(marker), `missing P4-10I marker ${marker}`);
+  }
+  assert.ok(runner.includes('rsi-lineage-closure'), 'missing P4-10I CLI');
+  assert.ok(report.includes('rsiStabilityLineageClosure'), 'missing production evidence section');
+  assert.ok(route.includes('/api/production-evidence-validation/rsi-lineage-closure'), 'missing P4-10I API route');
 });
 
 test('P4-6 guard blocks trading verbs and direct wallet semantics', () => {

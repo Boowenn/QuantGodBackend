@@ -23,6 +23,7 @@ def build_telegram_text(report: dict[str, Any]) -> str:
         _section_status("策略一致性", report.get("strategyFamilyParity") or {}),
         _section_status("执行反馈", report.get("liveExecutionFeedbackCoverage") or {}),
         _section_status("GA 多代稳定性", report.get("gaMultiGenerationStability") or {}),
+        _section_status("RSI lineage closure", report.get("rsiStabilityLineageClosure") or {}),
     ]
     blockers = report.get("blockersZh") or []
     if blockers:

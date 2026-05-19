@@ -82,6 +82,21 @@ async function handle(req, res, context) {
     sendJson(res, 200, payload);
     return;
   }
+  if (
+    req.method === 'GET' &&
+    (pathname === '/api/production-evidence-validation/rsi-lineage-closure' ||
+      pathname === '/api/production-evidence-validation/rsi-lineage-closure/status')
+  ) {
+    const refresh = requestUrl.includes('refresh=1') || requestUrl.includes('refresh=true');
+    const payload = await runPython(context.repoRoot, context.defaultRuntimeDir, 'rsi-lineage-closure', refresh ? ['--refresh'] : []);
+    sendJson(res, 200, payload);
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/api/production-evidence-validation/rsi-lineage-closure/run') {
+    const payload = await runPython(context.repoRoot, context.defaultRuntimeDir, 'rsi-lineage-closure', ['--write']);
+    sendJson(res, 200, payload);
+    return;
+  }
   if (req.method === 'GET' && pathname === '/api/production-evidence-validation/telegram-text') {
     const refresh = requestUrl.includes('refresh=1') || requestUrl.includes('refresh=true');
     const payload = await runPython(context.repoRoot, context.defaultRuntimeDir, 'telegram-text', refresh ? ['--refresh', '--write'] : []);

@@ -9,12 +9,14 @@ from .ga_audit import audit_ga
 from .history_audit import audit_history
 from .io_utils import ensure_dir, write_json
 from .parity_audit import audit_parity
+from .rsi_lineage_closure import build_rsi_lineage_closure, write_rsi_lineage_closure
 from .schema import (
     EXECUTION_FEEDBACK_COVERAGE,
     GA_STABILITY_REPORT,
     LATEST_REPORT,
     OUTPUT_DIR,
     REPORT_SCHEMA,
+    RSI_LINEAGE_CLOSURE_REPORT,
     SAFETY,
     STRATEGY_FAMILY_PARITY,
 )
@@ -34,6 +36,7 @@ def _next_actions(
     parity: dict[str, Any],
     execution_feedback: dict[str, Any],
     ga: dict[str, Any],
+    rsi_lineage: dict[str, Any],
 ) -> list[str]:
     actions: list[str] = []
     if parity.get("failCount"):
@@ -49,6 +52,8 @@ def _next_actions(
         actions.append("补齐 execution feedback 缺失字段，避免 Case Memory / GA fitness 误判")
     if ga.get("status") != "PASS":
         actions.append("连续观察 GA 多代 elite / graveyard / lineage 稳定性")
+    if rsi_lineage.get("status") != "PASS":
+        actions.append("冻结并复核 guarded RSI elite lineage，再判断 tester-only shadow promotion")
     if history.get("status") != "PASS":
         actions.append("确认 USDJPY 历史数据同步长期 PASS")
     if not actions:
@@ -61,7 +66,18 @@ def build_report(runtime_dir: Path) -> dict[str, Any]:
     parity = audit_parity(runtime_dir)
     execution_feedback = audit_execution_feedback(runtime_dir)
     ga = audit_ga(runtime_dir)
-    sections = [history, parity, execution_feedback, ga]
+    rsi_lineage = build_rsi_lineage_closure(
+        runtime_dir,
+        production_sections={
+            "overall": {"status": "PASS"},
+            "history": history,
+            "parity": parity,
+            "executionFeedback": execution_feedback,
+            "ga": ga,
+        },
+        write=False,
+    )
+    sections = [history, parity, execution_feedback, ga, rsi_lineage]
     status = _overall_status(sections)
     blockers = []
     if parity.get("failCount"):
@@ -75,6 +91,8 @@ def build_report(runtime_dir: Path) -> dict[str, Any]:
         blockers.append("USDJPY 历史数据深度或表覆盖不足")
     if ga.get("status") != "PASS":
         blockers.append("GA 多代稳定性证据不足")
+    if rsi_lineage.get("status") != "PASS":
+        blockers.append("RSI guarded elite lineage 尚未完成冻结/复核")
     return {
         "schema": REPORT_SCHEMA,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -85,8 +103,9 @@ def build_report(runtime_dir: Path) -> dict[str, Any]:
         "strategyFamilyParity": parity,
         "liveExecutionFeedbackCoverage": execution_feedback,
         "gaMultiGenerationStability": ga,
+        "rsiStabilityLineageClosure": rsi_lineage,
         "safety": SAFETY,
-        "nextActionsZh": _next_actions(history, parity, execution_feedback, ga),
+        "nextActionsZh": _next_actions(history, parity, execution_feedback, ga, rsi_lineage),
     }
 
 
@@ -97,11 +116,13 @@ def write_reports(runtime_dir: Path, report: dict[str, Any]) -> dict[str, str]:
         "parityMatrix": str(out_dir / STRATEGY_FAMILY_PARITY),
         "executionFeedbackCoverage": str(out_dir / EXECUTION_FEEDBACK_COVERAGE),
         "gaStability": str(out_dir / GA_STABILITY_REPORT),
+        "rsiLineageClosure": str(out_dir / RSI_LINEAGE_CLOSURE_REPORT),
     }
     write_json(Path(paths["latest"]), report)
     write_json(Path(paths["parityMatrix"]), report.get("strategyFamilyParity") or {})
     write_json(Path(paths["executionFeedbackCoverage"]), report.get("liveExecutionFeedbackCoverage") or {})
     write_json(Path(paths["gaStability"]), report.get("gaMultiGenerationStability") or {})
+    paths.update(write_rsi_lineage_closure(runtime_dir, report.get("rsiStabilityLineageClosure") or {}))
     return paths
 
 
