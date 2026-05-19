@@ -29,6 +29,8 @@ from .schema import (
     EA_STATUS_FILE,
     EA_SHADOW_EVALUATION_LEDGER_FILE,
     EA_SHADOW_EVALUATION_STATUS_FILE,
+    FROZEN_RSI_LINEAGE_FILE,
+    RSI_SHADOW_OBSERVATION_REPORT_FILE,
     SAFETY_BOUNDARY,
     contract_dir,
     utc_now_iso,
@@ -140,6 +142,88 @@ def _candidate_strategy(row: Dict[str, Any]) -> Dict[str, Any] | None:
     return seed if isinstance(seed, dict) else None
 
 
+def _load_frozen_rsi_lineage(runtime_dir: Path) -> Dict[str, Any]:
+    return _load_json(ga_dir(runtime_dir) / FROZEN_RSI_LINEAGE_FILE)
+
+
+def _frozen_lineage_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
+    criteria = payload.get("criteria") if isinstance(payload.get("criteria"), dict) else {}
+    lineage = payload.get("lineagePath") if isinstance(payload.get("lineagePath"), dict) else {}
+    production = (
+        payload.get("productionEvidenceAlignment")
+        if isinstance(payload.get("productionEvidenceAlignment"), dict)
+        else {}
+    )
+    replay = payload.get("replayAlignment") if isinstance(payload.get("replayAlignment"), dict) else {}
+    return {
+        "sourceFile": FROZEN_RSI_LINEAGE_FILE,
+        "frozenAt": payload.get("frozenAt"),
+        "selectedGeneration": payload.get("selectedGeneration"),
+        "selectedProfile": payload.get("selectedProfile"),
+        "selectedFingerprint": payload.get("selectedFingerprint"),
+        "lineageDepth": lineage.get("lineageDepth"),
+        "criteria": {
+            "allPass": bool(criteria.get("allPass")),
+            "sampleCount": criteria.get("sampleCount"),
+            "tradeCount": criteria.get("tradeCount"),
+            "netR": criteria.get("netR"),
+            "validationNetR": criteria.get("validationNetR"),
+            "forwardNetR": criteria.get("forwardNetR"),
+            "maxAdverseR": criteria.get("maxAdverseR"),
+            "walkForwardStatus": criteria.get("walkForwardStatus"),
+        },
+        "productionEvidenceAllPass": bool(production.get("allPass")),
+        "replayAllPass": bool(replay.get("allPass")),
+    }
+
+
+def _frozen_rsi_selection(runtime_dir: Path) -> Dict[str, Any] | None:
+    frozen = _load_frozen_rsi_lineage(runtime_dir)
+    seed = frozen.get("strategyJson") if isinstance(frozen.get("strategyJson"), dict) else {}
+    if not seed:
+        return None
+    validation = validate_strategy_json(seed)
+    if not validation.get("valid"):
+        return None
+    criteria = frozen.get("criteria") if isinstance(frozen.get("criteria"), dict) else {}
+    production = (
+        frozen.get("productionEvidenceAlignment")
+        if isinstance(frozen.get("productionEvidenceAlignment"), dict)
+        else {}
+    )
+    replay = frozen.get("replayAlignment") if isinstance(frozen.get("replayAlignment"), dict) else {}
+    normalized = validation.get("normalized") or normalize_strategy_json(seed)
+    if (
+        normalized.get("strategyFamily") != "RSI_Reversal"
+        or normalized.get("direction") != "LONG"
+        or not criteria.get("allPass")
+        or not production.get("allPass")
+        or not replay.get("allPass")
+    ):
+        return None
+    row = {
+        "seedId": normalized.get("seedId"),
+        "strategyId": normalized.get("strategyId"),
+        "strategyFamily": normalized.get("strategyFamily"),
+        "direction": normalized.get("direction"),
+        "source": "P4_10I_FROZEN_RSI_LINEAGE",
+        "fingerprint": frozen.get("selectedFingerprint") or strategy_fingerprint(normalized),
+        "status": "ELITE_SELECTED",
+        "promotionStage": "TESTER_ONLY",
+        "fitness": criteria.get("fitness"),
+        "rank": criteria.get("rank"),
+        "strategyJson": normalized,
+    }
+    selection = _selection_from_row(
+        row,
+        validation,
+        source="P4_10J_FROZEN_RSI_SEED",
+        reason_zh="按 P4-10I 冻结的 guarded RSI elite lineage 强制轮换到 EA 只读 shadow contract。",
+    )
+    selection["frozenLineage"] = _frozen_lineage_summary(frozen)
+    return selection
+
+
 def _valid_candidate_rows(runtime_dir: Path) -> Iterable[Tuple[Dict[str, Any], Dict[str, Any]]]:
     elites = _load_json(ga_dir(runtime_dir) / ELITE_FILE).get("elites")
     rows: List[Dict[str, Any]] = [row for row in elites if isinstance(row, dict)] if isinstance(elites, list) else []
@@ -180,6 +264,7 @@ def select_strategy_candidate(
     *,
     forced_seed_id: str | None = None,
     forced_family: str | None = None,
+    force_frozen_rsi: bool = False,
 ) -> Dict[str, Any]:
     forced_seed_id = _safe_str(forced_seed_id)
     forced_family = _safe_str(forced_family)
@@ -195,6 +280,11 @@ def select_strategy_candidate(
                     reason_zh="按 seedId 轮换 Strategy JSON → EA 只读影子评估契约；不代表晋级或实盘授权。",
                 )
         raise ValueError(f"Strategy JSON seed not found or invalid for shadow contract rotation: {forced_seed_id}")
+    if force_frozen_rsi:
+        selection = _frozen_rsi_selection(runtime_dir)
+        if selection:
+            return selection
+        raise ValueError("Frozen RSI lineage is missing, invalid, or not closed for shadow contract rotation")
     if forced_family:
         if forced_family not in ALLOWED_STRATEGY_FAMILIES:
             raise ValueError(f"Strategy JSON family is not allowed for shadow contract rotation: {forced_family}")
@@ -248,6 +338,7 @@ def _strategy_summary(strategy_json: Dict[str, Any]) -> Dict[str, Any]:
         "lane": strategy_json.get("lane"),
         "strategyFamily": strategy_json.get("strategyFamily"),
         "direction": strategy_json.get("direction"),
+        "qualityProfile": strategy_json.get("qualityProfile"),
         "timeframes": strategy_json.get("timeframes") if isinstance(strategy_json.get("timeframes"), list) else [],
         "entryMode": entry.get("mode") or "OPPORTUNITY_ENTRY",
         "entryConditions": entry.get("conditions") if isinstance(entry.get("conditions"), list) else [],
@@ -256,6 +347,11 @@ def _strategy_summary(strategy_json: Dict[str, Any]) -> Dict[str, Any]:
             "timeframe": rsi.get("timeframe") or "H1",
             "buyBand": float(rsi.get("buyBand", 34)),
             "crossbackThreshold": float(rsi.get("crossbackThreshold", 0.8)),
+            "adverseExcursionGuard": (
+                rsi.get("adverseExcursionGuard")
+                if isinstance(rsi.get("adverseExcursionGuard"), dict)
+                else {}
+            ),
         },
         "familyParameters": family_parameters,
         "exit": {
@@ -275,6 +371,7 @@ def _strategy_summary(strategy_json: Dict[str, Any]) -> Dict[str, Any]:
 def _build_ea_text(contract: Dict[str, Any]) -> str:
     strategy = contract["strategy"]
     rsi = strategy["rsi"]
+    adverse_guard = rsi.get("adverseExcursionGuard") if isinstance(rsi.get("adverseExcursionGuard"), dict) else {}
     family_params = strategy.get("familyParameters") if isinstance(strategy.get("familyParameters"), dict) else {}
     ma = family_params.get("ma") if isinstance(family_params.get("ma"), dict) else {}
     bollinger = family_params.get("bollinger") if isinstance(family_params.get("bollinger"), dict) else {}
@@ -298,6 +395,7 @@ def _build_ea_text(contract: Dict[str, Any]) -> str:
         "strategyId": strategy.get("strategyId"),
         "strategyFamily": strategy.get("strategyFamily"),
         "direction": strategy.get("direction"),
+        "qualityProfile": strategy.get("qualityProfile"),
         "lane": strategy.get("lane"),
         "entryMode": strategy.get("entryMode"),
         "timeframes": strategy.get("timeframes"),
@@ -305,6 +403,13 @@ def _build_ea_text(contract: Dict[str, Any]) -> str:
         "rsiTimeframe": rsi.get("timeframe"),
         "rsiBuyBand": rsi.get("buyBand"),
         "rsiCrossbackThreshold": rsi.get("crossbackThreshold"),
+        "rsiAdverseGuardMode": adverse_guard.get("mode"),
+        "rsiAdverseGuardMaxEarlyAdverseR": adverse_guard.get("maxEarlyAdverseR"),
+        "rsiAdverseGuardMaxEntryRangePips": adverse_guard.get("maxEntryRangePips"),
+        "rsiAdverseGuardConfirmationBars": adverse_guard.get("confirmationBars"),
+        "rsiAdverseGuardLookaheadBars": adverse_guard.get("lookaheadBars"),
+        "rsiAdverseGuardMinConfirmR": adverse_guard.get("minConfirmR"),
+        "rsiAdverseGuardRangeLookbackBars": adverse_guard.get("rangeLookbackBars"),
         "familyParameters": family_params,
         "maTimeframe": ma.get("timeframe"),
         "maFastPeriod": ma.get("fastPeriod"),
@@ -404,8 +509,14 @@ def build_strategy_contract(
     *,
     forced_seed_id: str | None = None,
     forced_family: str | None = None,
+    force_frozen_rsi: bool = False,
 ) -> Dict[str, Any]:
-    selection = select_strategy_candidate(runtime_dir, forced_seed_id=forced_seed_id, forced_family=forced_family)
+    selection = select_strategy_candidate(
+        runtime_dir,
+        forced_seed_id=forced_seed_id,
+        forced_family=forced_family,
+        force_frozen_rsi=force_frozen_rsi,
+    )
     strategy_json = selection["strategyJson"]
     strategy = _strategy_summary(strategy_json)
     fingerprint = strategy_fingerprint(strategy_json)
@@ -424,6 +535,8 @@ def build_strategy_contract(
         "selectionReasonZh": selection["reasonZh"],
         "forcedSeedId": forced_seed_id or None,
         "forcedFamily": forced_family or None,
+        "forceFrozenRsi": bool(force_frozen_rsi),
+        "frozenRsiLineage": selection.get("frozenLineage") or {},
         "fingerprint": fingerprint,
         "strategy": strategy,
         "strategyJson": strategy_json,
@@ -458,6 +571,218 @@ def build_strategy_contract(
             _write_json(base / CONTRACT_STATUS_FILE, status)
             (base / CONTRACT_EA_FILE).write_text(ea_text, encoding="utf-8")
     return status
+
+
+def build_rsi_shadow_contract_observation(runtime_dir: Path, *, write: bool = True) -> Dict[str, Any]:
+    runtime_dir = Path(runtime_dir)
+    frozen = _load_frozen_rsi_lineage(runtime_dir)
+    frozen_seed_id = str(frozen.get("selectedSeedId") or "")
+    frozen_fingerprint = str(frozen.get("selectedFingerprint") or "")
+    contract_status = _load_json(runtime_dir / CONTRACT_STATUS_FILE) or _load_json(
+        contract_dir(runtime_dir) / CONTRACT_STATUS_FILE
+    )
+    contract = contract_status.get("contract") if isinstance(contract_status.get("contract"), dict) else {}
+    if not contract:
+        contract = _load_json(runtime_dir / CONTRACT_JSON_FILE) or _load_json(contract_dir(runtime_dir) / CONTRACT_JSON_FILE)
+    shadow_status = _read_shadow_evaluation_status(runtime_dir)
+    rows = _read_shadow_evaluation_ledger(runtime_dir, limit=512)
+    if shadow_status:
+        rows.append(shadow_status)
+    matching = [
+        row
+        for row in rows
+        if _row_matches_frozen_seed(row, frozen_seed_id, frozen_fingerprint)
+    ]
+    latest = _latest_shadow_row(matching)
+    contract_rotated = bool(frozen_seed_id) and str(contract.get("selectedSeedId") or "") == frozen_seed_id
+    entry_quality = _entry_quality_summary(matching)
+    adverse = _adverse_quality_summary(matching, frozen)
+    blockers: List[Dict[str, Any]] = []
+    if not frozen_seed_id:
+        blockers.append({"code": "NO_FROZEN_RSI_LINEAGE", "reasonZh": "缺少 P4-10I frozen RSI lineage。"})
+    if not contract_rotated:
+        blockers.append({"code": "FROZEN_RSI_CONTRACT_NOT_ROTATED", "reasonZh": "EA contract 尚未轮换到 frozen RSI seed。"})
+    if not matching:
+        blockers.append({"code": "WAITING_FROZEN_RSI_SHADOW_LEDGER", "reasonZh": "等待 EA 写入 frozen RSI seed 的 shadow evaluation ledger。"})
+    if entry_quality.get("status") == "FAIL":
+        blockers.append({"code": "RSI_SHADOW_ENTRY_QUALITY_FAIL", "reasonZh": entry_quality.get("reasonZh")})
+    if adverse.get("status") == "FAIL":
+        blockers.append({"code": "RSI_SHADOW_ADVERSE_DEGRADED", "reasonZh": adverse.get("reasonZh")})
+    status = "PASS"
+    if blockers:
+        hard_blockers = {"NO_FROZEN_RSI_LINEAGE", "FROZEN_RSI_CONTRACT_NOT_ROTATED", "RSI_SHADOW_ADVERSE_DEGRADED"}
+        status = "WARN"
+        if any(blocker.get("code") in hard_blockers for blocker in blockers):
+            status = "WARN"
+    elif entry_quality.get("status") == "WATCH" or adverse.get("status") == "WATCH":
+        status = "WATCH"
+    report = {
+        "ok": True,
+        "schema": "quantgod.rsi_shadow_contract_observation.v1",
+        "generatedAt": utc_now_iso(),
+        "status": status,
+        "phase": "P4_10J_RSI_SHADOW_CONTRACT_OBSERVATION",
+        "frozenSeedId": frozen_seed_id or None,
+        "frozenFingerprint": frozen_fingerprint or None,
+        "contractRotation": {
+            "selectedSeedId": contract.get("selectedSeedId"),
+            "selectionSource": contract.get("selectionSource"),
+            "forceFrozenRsi": bool(contract.get("forceFrozenRsi")),
+            "matchesFrozenSeed": contract_rotated,
+            "contractMode": contract.get("contractMode"),
+        },
+        "shadowEvaluation": {
+            "matchingRowCount": len(matching),
+            "latest": _shadow_row_summary(latest),
+            "statusCounts": dict(_status_counts(matching)),
+            "sourceRowsInspected": len(rows),
+        },
+        "entryQuality": entry_quality,
+        "adverseExcursion": adverse,
+        "blockers": blockers,
+        "recommendationsZh": _rsi_shadow_observation_recommendations(status, blockers),
+        "safety": dict(SAFETY_BOUNDARY),
+    }
+    if write:
+        _write_json(contract_dir(runtime_dir) / RSI_SHADOW_OBSERVATION_REPORT_FILE, report)
+    return report
+
+
+def _row_matches_frozen_seed(row: Dict[str, Any], seed_id: str, fingerprint: str) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if seed_id and str(row.get("selectedSeedId") or "") == seed_id:
+        return True
+    return bool(fingerprint and str(row.get("fingerprint") or "") == fingerprint)
+
+
+def _latest_shadow_row(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not rows:
+        return {}
+    return sorted(rows, key=lambda item: str(item.get("generatedAtServer") or item.get("generatedAtLocal") or ""))[-1]
+
+
+def _status_counts(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status") or "UNKNOWN")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _shadow_row_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    if not row:
+        return {}
+    adverse_guard = row.get("rsiAdverseGuard") if isinstance(row.get("rsiAdverseGuard"), dict) else {}
+    return {
+        "evaluationId": row.get("evaluationId"),
+        "generatedAtLocal": row.get("generatedAtLocal"),
+        "generatedAtServer": row.get("generatedAtServer"),
+        "status": row.get("status"),
+        "blocker": row.get("blocker"),
+        "selectedSeedId": row.get("selectedSeedId"),
+        "strategyFamily": row.get("strategyFamily"),
+        "direction": row.get("direction"),
+        "wouldEnter": bool(row.get("wouldEnter")),
+        "hardGuardsPass": bool(row.get("hardGuardsPass")),
+        "indicatorReady": bool(row.get("indicatorReady")),
+        "rsiLongSignal": bool(row.get("rsiLongSignal")),
+        "spreadPips": row.get("spreadPips"),
+        "rsiClosed1": row.get("rsiClosed1"),
+        "rsiClosed2": row.get("rsiClosed2"),
+        "rsiAdverseGuard": adverse_guard,
+        "reasonZh": row.get("reasonZh"),
+    }
+
+
+def _entry_quality_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not rows:
+        return {"status": "WATCH", "reasonZh": "等待 frozen RSI seed 的 EA shadow evaluation 样本。"}
+    would_enter = [row for row in rows if bool(row.get("wouldEnter")) or row.get("status") == "SHADOW_WOULD_ENTER"]
+    hard_pass = sum(1 for row in rows if bool(row.get("hardGuardsPass")))
+    indicator_ready = sum(1 for row in rows if bool(row.get("indicatorReady")))
+    guard_blocked = sum(1 for row in rows if str(row.get("status") or "") == "SHADOW_GUARD_BLOCKED")
+    if any(str(row.get("status") or "") in {"SAFETY_REJECTED", "MODE_REJECTED", "SYMBOL_REJECTED"} for row in rows):
+        status = "FAIL"
+        reason = "EA shadow evaluation 拒绝了 contract 安全边界。"
+    elif would_enter and all(bool(row.get("hardGuardsPass")) for row in would_enter):
+        status = "PASS"
+        reason = "frozen RSI seed 已在 EA shadow ledger 里复现 would-enter，且硬守门通过。"
+    elif guard_blocked:
+        status = "WATCH"
+        reason = "EA 已读取 frozen RSI seed，但当前 tick/spread/session/news 守门阻断。"
+    else:
+        status = "WATCH"
+        reason = "EA 已读取 frozen RSI seed，当前 RSI 入场条件尚未触发；继续观察。"
+    return {
+        "status": status,
+        "rowCount": len(rows),
+        "wouldEnterCount": len(would_enter),
+        "hardGuardsPassCount": hard_pass,
+        "indicatorReadyCount": indicator_ready,
+        "guardBlockedCount": guard_blocked,
+        "reasonZh": reason,
+    }
+
+
+def _adverse_quality_summary(rows: List[Dict[str, Any]], frozen: Dict[str, Any]) -> Dict[str, Any]:
+    criteria = frozen.get("criteria") if isinstance(frozen.get("criteria"), dict) else {}
+    baseline_max_adverse = _safe_float(criteria.get("maxAdverseR"), None)
+    observed_values = [_adverse_value(row) for row in rows]
+    observed_values = [value for value in observed_values if value is not None]
+    guard_loaded_count = sum(1 for row in rows if _rsi_adverse_guard_loaded(row))
+    if observed_values:
+        worst = min(observed_values)
+        status = "PASS" if worst >= -1.15 else "FAIL"
+        reason = "EA shadow adverse 样本仍在 P4-10H/P4-10I 低回撤阈值内。" if status == "PASS" else "EA shadow adverse 样本重新劣化。"
+    elif rows and guard_loaded_count:
+        worst = None
+        status = "WATCH"
+        reason = "EA 已加载 RSI adverse guard；等待 post-entry adverse/MAE 样本。"
+    elif rows:
+        worst = None
+        status = "WATCH"
+        reason = "EA 已写入 frozen seed ledger，但当前 EA build 尚未输出 adverse guard 字段。"
+    else:
+        worst = None
+        status = "WATCH"
+        reason = "等待 frozen RSI seed 的 shadow ledger 后再判断 adverse excursion。"
+    return {
+        "status": status,
+        "baselineMaxAdverseR": baseline_max_adverse,
+        "observedAdverseSampleCount": len(observed_values),
+        "worstObservedAdverseR": worst,
+        "guardLoadedCount": guard_loaded_count,
+        "reasonZh": reason,
+    }
+
+
+def _adverse_value(row: Dict[str, Any]) -> float | None:
+    for key in ("maxAdverseR", "maeR", "adverseR", "earlyAdverseR", "rsiAdverseR"):
+        value = _safe_float(row.get(key), None)
+        if value is not None:
+            return value
+    return None
+
+
+def _rsi_adverse_guard_loaded(row: Dict[str, Any]) -> bool:
+    guard = row.get("rsiAdverseGuard") if isinstance(row.get("rsiAdverseGuard"), dict) else {}
+    return bool(guard.get("mode") or row.get("rsiAdverseGuardMode"))
+
+
+def _safe_float(value: Any, fallback: float | None = 0.0) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _rsi_shadow_observation_recommendations(status: str, blockers: List[Dict[str, Any]]) -> List[str]:
+    if status == "PASS":
+        return ["继续让 EA shadow contract 收集 frozen RSI 入场/结果样本，暂不扩大 live scope。"]
+    if blockers:
+        return [str(blocker.get("reasonZh") or blocker.get("code")) for blocker in blockers]
+    return ["继续观察 frozen RSI seed 的 EA shadow ledger。"]
 
 
 def read_strategy_contract_status(runtime_dir: Path) -> Dict[str, Any]:

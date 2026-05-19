@@ -50,6 +50,11 @@ test('Strategy JSON contract backend writes only shadow/tester/paper adapter fil
     'forced_family',
     'GA_CANDIDATE_FORCED_SEED',
     'GA_CANDIDATE_FORCED_FAMILY',
+    'P4_10J_FROZEN_RSI_SEED',
+    'FROZEN_RSI_LINEAGE_FILE',
+    'RSI_SHADOW_OBSERVATION_REPORT_FILE',
+    'force_frozen_rsi',
+    'rsiAdverseGuardMode',
   ]) {
     assert.match(source, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
@@ -110,6 +115,8 @@ test('MQL5 adapter is read-only and cannot affect live execution', () => {
     'orderSendAllowed',
     'livePresetMutationAllowed',
     'wouldAffectLive',
+    'rsiAdverseGuard',
+    'RSI_ADVERSE_GUARD_RANGE_BLOCK',
   ]) {
     assert.match(block, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }

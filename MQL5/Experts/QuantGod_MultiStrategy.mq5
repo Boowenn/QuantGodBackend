@@ -6059,10 +6059,18 @@ string BuildStrategyJsonEAShadowEvaluationJson()
    string direction = "";
    string lane = "";
    string entryMode = "";
+   string qualityProfile = "";
    string rsiTimeframeLabel = "";
    int rsiPeriod = 0;
    double rsiBuyBand = 0.0;
    double rsiCrossbackThreshold = 0.0;
+   string rsiAdverseGuardMode = "";
+   double rsiAdverseGuardMaxEarlyAdverseR = 0.0;
+   double rsiAdverseGuardMaxEntryRangePips = 0.0;
+   int rsiAdverseGuardConfirmationBars = 0;
+   int rsiAdverseGuardLookaheadBars = 0;
+   double rsiAdverseGuardMinConfirmR = 0.0;
+   int rsiAdverseGuardRangeLookbackBars = 0;
    string maTimeframeLabel = "";
    int maFastPeriod = 9;
    int maSlowPeriod = 21;
@@ -6124,10 +6132,18 @@ string BuildStrategyJsonEAShadowEvaluationJson()
          direction = StrategyJsonContractValue(content, "direction", "");
          lane = StrategyJsonContractValue(content, "lane", "");
          entryMode = StrategyJsonContractValue(content, "entryMode", "");
+         qualityProfile = StrategyJsonContractValue(content, "qualityProfile", "");
          rsiPeriod = StrategyJsonContractInt(content, "rsiPeriod", PilotRsiPeriod);
          rsiTimeframeLabel = StrategyJsonContractValue(content, "rsiTimeframe", TimeframeLabel(PilotRsiTimeframe));
          rsiBuyBand = StrategyJsonContractDouble(content, "rsiBuyBand", PilotRsiOversold);
          rsiCrossbackThreshold = StrategyJsonContractDouble(content, "rsiCrossbackThreshold", PilotRsiCrossbackThreshold);
+         rsiAdverseGuardMode = StrategyJsonContractValue(content, "rsiAdverseGuardMode", "");
+         rsiAdverseGuardMaxEarlyAdverseR = StrategyJsonContractDouble(content, "rsiAdverseGuardMaxEarlyAdverseR", 0.0);
+         rsiAdverseGuardMaxEntryRangePips = StrategyJsonContractDouble(content, "rsiAdverseGuardMaxEntryRangePips", 0.0);
+         rsiAdverseGuardConfirmationBars = StrategyJsonContractInt(content, "rsiAdverseGuardConfirmationBars", 0);
+         rsiAdverseGuardLookaheadBars = StrategyJsonContractInt(content, "rsiAdverseGuardLookaheadBars", 0);
+         rsiAdverseGuardMinConfirmR = StrategyJsonContractDouble(content, "rsiAdverseGuardMinConfirmR", 0.0);
+         rsiAdverseGuardRangeLookbackBars = StrategyJsonContractInt(content, "rsiAdverseGuardRangeLookbackBars", 0);
          maTimeframeLabel = StrategyJsonContractValue(content, "maTimeframe", TimeframeLabel(PilotSignalTimeframe));
          maFastPeriod = StrategyJsonContractInt(content, "maFastPeriod", PilotFastMAPeriod);
          maSlowPeriod = StrategyJsonContractInt(content, "maSlowPeriod", PilotSlowMAPeriod);
@@ -6201,6 +6217,40 @@ string BuildStrategyJsonEAShadowEvaluationJson()
    double rsi2 = RSIValue(symbol, rsiTimeframe, effectiveRsiPeriod, 2);
    bool indicatorReady = (rsi1 > 0.0 && rsi2 > 0.0);
    bool rsiLongSignal = (indicatorReady && (rsi1 <= effectiveBuyBand || (rsi2 < effectiveBuyBand && rsi1 > effectiveBuyBand + effectiveThreshold)));
+   bool rsiAdverseGuardLoaded = (StringLen(rsiAdverseGuardMode) > 0);
+   bool rsiAdverseGuardRangeReady = false;
+   bool rsiAdverseGuardRangePass = true;
+   double rsiAdverseGuardEntryRangePips = 0.0;
+   if(rsiAdverseGuardLoaded && rsiAdverseGuardMaxEntryRangePips > 0.0)
+   {
+      int rangeBars = MathMax(1, rsiAdverseGuardRangeLookbackBars);
+      double rangeHigh = 0.0;
+      double rangeLow = 0.0;
+      for(int guardBar = 1; guardBar <= rangeBars; guardBar++)
+      {
+         double highValue = iHigh(symbol, rsiTimeframe, guardBar);
+         double lowValue = iLow(symbol, rsiTimeframe, guardBar);
+         if(highValue <= 0.0 || lowValue <= 0.0)
+            continue;
+         if(!rsiAdverseGuardRangeReady)
+         {
+            rangeHigh = highValue;
+            rangeLow = lowValue;
+            rsiAdverseGuardRangeReady = true;
+         }
+         else
+         {
+            rangeHigh = MathMax(rangeHigh, highValue);
+            rangeLow = MathMin(rangeLow, lowValue);
+         }
+      }
+      double rangePip = PipSize(symbol);
+      if(rsiAdverseGuardRangeReady && rangePip > 0.0)
+      {
+         rsiAdverseGuardEntryRangePips = MathAbs(rangeHigh - rangeLow) / rangePip;
+         rsiAdverseGuardRangePass = (rsiAdverseGuardEntryRangePips <= rsiAdverseGuardMaxEntryRangePips);
+      }
+   }
    bool hardGuardsPass = (tickOk && spreadAllowed && sessionOpen && !newsBlocked);
    bool wouldEnter = false;
    ENUM_TIMEFRAMES maTimeframe = StrategyJsonContractTimeframe(maTimeframeLabel, PilotSignalTimeframe);
@@ -6876,6 +6926,12 @@ string BuildStrategyJsonEAShadowEvaluationJson()
             blocker = "NEWS_HARD_BLOCK";
          reason = "Strategy JSON shadow evaluation 只记录机会；runtime/session/spread/news 硬守门未通过，不会进入实盘。";
       }
+      else if(rsiAdverseGuardLoaded && !rsiAdverseGuardRangePass)
+      {
+         status = "SHADOW_GUARD_BLOCKED";
+         blocker = "RSI_ADVERSE_GUARD_RANGE_BLOCK";
+         reason = "frozen RSI adverse guard 发现入场前波动范围偏大；EA 只记录 shadow 阻断，不影响实盘。";
+      }
       else if(rsiLongSignal)
       {
          status = "SHADOW_WOULD_ENTER";
@@ -6911,6 +6967,7 @@ string BuildStrategyJsonEAShadowEvaluationJson()
    json += "\"direction\":\"" + JsonEscape(direction) + "\",";
    json += "\"lane\":\"" + JsonEscape(lane) + "\",";
    json += "\"entryMode\":\"" + JsonEscape(entryMode) + "\",";
+   json += "\"qualityProfile\":\"" + JsonEscape(qualityProfile) + "\",";
    json += "\"symbol\":\"" + JsonEscape(symbol) + "\",";
    json += "\"timeframe\":\"" + JsonEscape(TimeframeLabel(rsiTimeframe)) + "\",";
    json += "\"contractFamilyImplemented\":" + JsonBool(contractFamilyImplemented) + ",";
@@ -6919,6 +6976,17 @@ string BuildStrategyJsonEAShadowEvaluationJson()
    json += "\"rsiClosed2\":" + FormatNumber(rsi2, 4) + ",";
    json += "\"rsiBuyBand\":" + FormatNumber(effectiveBuyBand, 4) + ",";
    json += "\"rsiCrossbackThreshold\":" + FormatNumber(effectiveThreshold, 4) + ",";
+   json += "\"rsiAdverseGuard\":{\"loaded\":" + JsonBool(rsiAdverseGuardLoaded) + ",";
+   json += "\"mode\":\"" + JsonEscape(rsiAdverseGuardMode) + "\",";
+   json += "\"maxEarlyAdverseR\":" + FormatNumber(rsiAdverseGuardMaxEarlyAdverseR, 4) + ",";
+   json += "\"maxEntryRangePips\":" + FormatNumber(rsiAdverseGuardMaxEntryRangePips, 2) + ",";
+   json += "\"confirmationBars\":" + IntegerToString(rsiAdverseGuardConfirmationBars) + ",";
+   json += "\"lookaheadBars\":" + IntegerToString(rsiAdverseGuardLookaheadBars) + ",";
+   json += "\"minConfirmR\":" + FormatNumber(rsiAdverseGuardMinConfirmR, 4) + ",";
+   json += "\"rangeLookbackBars\":" + IntegerToString(rsiAdverseGuardRangeLookbackBars) + ",";
+   json += "\"entryRangePips\":" + FormatNumber(rsiAdverseGuardEntryRangePips, 2) + ",";
+   json += "\"rangeReady\":" + JsonBool(rsiAdverseGuardRangeReady) + ",";
+   json += "\"rangePass\":" + JsonBool(rsiAdverseGuardRangePass) + "},";
    json += "\"indicatorReady\":" + JsonBool(indicatorReady) + ",";
    json += "\"rsiLongSignal\":" + JsonBool(rsiLongSignal) + ",";
    json += "\"wouldEnter\":" + JsonBool(wouldEnter) + ",";

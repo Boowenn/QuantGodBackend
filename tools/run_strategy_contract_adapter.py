@@ -8,7 +8,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from strategy_contract_adapter.builder import build_strategy_contract, read_strategy_contract_status
+from strategy_contract_adapter.builder import (
+    build_rsi_shadow_contract_observation,
+    build_strategy_contract,
+    read_strategy_contract_status,
+)
 from strategy_contract_adapter.telegram_text import contract_to_chinese_text
 from usdjpy_evidence_os.telegram_gateway import dispatch_text
 
@@ -46,14 +50,21 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--write", action="store_true")
     status.add_argument("--seed-id")
     status.add_argument("--family")
+    status.add_argument("--frozen-rsi", action="store_true")
     build = sub.add_parser("build")
     build.add_argument("--seed-id")
     build.add_argument("--family")
+    build.add_argument("--frozen-rsi", action="store_true")
+    frozen = sub.add_parser("build-frozen-rsi")
+    frozen.add_argument("--observe", action="store_true")
+    observe = sub.add_parser("rsi-shadow-observation")
+    observe.add_argument("--write", action="store_true")
     text = sub.add_parser("telegram-text")
     text.add_argument("--refresh", action="store_true")
     text.add_argument("--send", action="store_true")
     text.add_argument("--seed-id")
     text.add_argument("--family")
+    text.add_argument("--frozen-rsi", action="store_true")
     args = parser.parse_args(argv)
     runtime_dir = Path(args.runtime_dir)
 
@@ -65,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
                     write=True,
                     forced_seed_id=args.seed_id,
                     forced_family=args.family,
+                    force_frozen_rsi=args.frozen_rsi,
                 )
             )
         return emit(read_strategy_contract_status(runtime_dir))
@@ -75,8 +87,16 @@ def main(argv: list[str] | None = None) -> int:
                 write=True,
                 forced_seed_id=args.seed_id,
                 forced_family=args.family,
+                force_frozen_rsi=args.frozen_rsi,
             )
         )
+    if args.command == "build-frozen-rsi":
+        payload = build_strategy_contract(runtime_dir, write=True, force_frozen_rsi=True)
+        if args.observe:
+            payload["rsiShadowContractObservation"] = build_rsi_shadow_contract_observation(runtime_dir, write=True)
+        return emit(payload)
+    if args.command == "rsi-shadow-observation":
+        return emit(build_rsi_shadow_contract_observation(runtime_dir, write=args.write))
     if args.command == "telegram-text":
         payload = (
             build_strategy_contract(
@@ -84,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
                 write=True,
                 forced_seed_id=args.seed_id,
                 forced_family=args.family,
+                force_frozen_rsi=args.frozen_rsi,
             )
             if args.refresh
             else read_strategy_contract_status(runtime_dir)

@@ -5,13 +5,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.strategy_contract_adapter.builder import build_strategy_contract, read_strategy_contract_status
+from tools.strategy_contract_adapter.builder import (
+    build_rsi_shadow_contract_observation,
+    build_strategy_contract,
+    read_strategy_contract_status,
+)
 from tools.strategy_contract_adapter.schema import (
     CONTRACT_EA_FILE,
     CONTRACT_JSON_FILE,
     EA_STATUS_FILE,
     EA_SHADOW_EVALUATION_LEDGER_FILE,
     EA_SHADOW_EVALUATION_STATUS_FILE,
+    FROZEN_RSI_LINEAGE_FILE,
+    RSI_SHADOW_OBSERVATION_REPORT_FILE,
 )
 from tools.strategy_ga.fitness import score_seed
 from tools.strategy_ga.schema import CANDIDATE_RUNS_FILE, ga_dir
@@ -21,6 +27,47 @@ from tools.usdjpy_evidence_os.case_memory import build_case_memory
 
 
 class StrategyContractAdapterTests(unittest.TestCase):
+    def _write_frozen_rsi_lineage(self, runtime: Path, seed_id: str = "GA-USDJPY-FROZEN-RSI") -> dict:
+        seed = base_strategy_seed(seed_id)
+        seed["qualityProfile"] = "RSI_REVERSAL_GUARDED_SAMPLE_RECOVERY"
+        seed["indicators"]["rsi"]["adverseExcursionGuard"] = {
+            "mode": "P4_10G_RSI_ADVERSE_EXCURSION",
+            "maxEarlyAdverseR": 0.96,
+            "maxEntryRangePips": 64,
+            "confirmationBars": 3,
+            "lookaheadBars": 3,
+            "minConfirmR": 0.03,
+            "rangeLookbackBars": 5,
+        }
+        frozen = {
+            "schema": "quantgod.rsi_frozen_elite_lineage.v1",
+            "frozenAt": "2026-05-19T00:00:00Z",
+            "selectedSeedId": seed_id,
+            "selectedGeneration": 79,
+            "selectedFingerprint": "fp-frozen-rsi",
+            "selectedProfile": seed["qualityProfile"],
+            "strategyJson": seed,
+            "criteria": {
+                "allPass": True,
+                "fitness": 3.48,
+                "rank": 1,
+                "sampleCount": 30,
+                "tradeCount": 23,
+                "netR": 3.69,
+                "validationNetR": 1.56,
+                "forwardNetR": 2.05,
+                "maxAdverseR": -0.96,
+                "walkForwardStatus": "PASS",
+            },
+            "productionEvidenceAlignment": {"allPass": True},
+            "replayAlignment": {"allPass": True},
+            "lineagePath": {"lineageDepth": 11},
+        }
+        path = ga_dir(runtime) / FROZEN_RSI_LINEAGE_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(frozen, ensure_ascii=False), encoding="utf-8")
+        return frozen
+
     def test_build_writes_shadow_only_contract_and_ea_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = Path(tmp)
@@ -183,6 +230,25 @@ class StrategyContractAdapterTests(unittest.TestCase):
             self.assertEqual(contract["selectedSeedId"], "GA-USDJPY-BB-ROTATE")
             self.assertFalse(contract["safety"]["gaDirectLiveAllowed"])
 
+    def test_build_can_force_frozen_rsi_lineage_for_shadow_contract_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            self._write_frozen_rsi_lineage(runtime)
+
+            payload = build_strategy_contract(runtime, write=True, force_frozen_rsi=True)
+            contract = payload["contract"]
+            ea_text = (runtime / CONTRACT_EA_FILE).read_text(encoding="utf-8")
+
+            self.assertEqual(contract["selectionSource"], "P4_10J_FROZEN_RSI_SEED")
+            self.assertTrue(contract["forceFrozenRsi"])
+            self.assertEqual(contract["selectedSeedId"], "GA-USDJPY-FROZEN-RSI")
+            self.assertEqual(contract["strategy"]["qualityProfile"], "RSI_REVERSAL_GUARDED_SAMPLE_RECOVERY")
+            self.assertEqual(contract["strategy"]["rsi"]["adverseExcursionGuard"]["maxEntryRangePips"], 64)
+            self.assertIn("qualityProfile=RSI_REVERSAL_GUARDED_SAMPLE_RECOVERY", ea_text)
+            self.assertIn("rsiAdverseGuardMode=P4_10G_RSI_ADVERSE_EXCURSION", ea_text)
+            self.assertIn("rsiAdverseGuardMaxEntryRangePips=64", ea_text)
+            self.assertFalse(contract["safety"]["orderSendAllowed"])
+
     def test_forced_rotation_rejects_missing_family_without_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = Path(tmp)
@@ -242,6 +308,45 @@ class StrategyContractAdapterTests(unittest.TestCase):
 
             self.assertEqual(status["eaShadowEvaluation"]["status"], "SHADOW_WOULD_ENTER")
             self.assertEqual(status["eaShadowEvaluationRecent"][-1]["evaluationId"], "eval-1")
+
+    def test_rsi_shadow_contract_observation_reads_frozen_seed_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            self._write_frozen_rsi_lineage(runtime)
+            build_strategy_contract(runtime, write=True, force_frozen_rsi=True)
+            row = {
+                "schema": "quantgod.strategy_json_ea_shadow_evaluation.v1",
+                "evaluationId": "eval-frozen-rsi",
+                "status": "SHADOW_WOULD_ENTER",
+                "blocker": "NONE",
+                "selectedSeedId": "GA-USDJPY-FROZEN-RSI",
+                "fingerprint": "fp-frozen-rsi",
+                "strategyFamily": "RSI_Reversal",
+                "direction": "LONG",
+                "wouldEnter": True,
+                "hardGuardsPass": True,
+                "indicatorReady": True,
+                "rsiLongSignal": True,
+                "maeR": -0.42,
+                "rsiAdverseGuard": {
+                    "loaded": True,
+                    "mode": "P4_10G_RSI_ADVERSE_EXCURSION",
+                    "rangePass": True,
+                },
+            }
+            (runtime / EA_SHADOW_EVALUATION_LEDGER_FILE).write_text(
+                json.dumps(row, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            report = build_rsi_shadow_contract_observation(runtime, write=True)
+
+            self.assertEqual(report["status"], "PASS")
+            self.assertTrue(report["contractRotation"]["matchesFrozenSeed"])
+            self.assertEqual(report["entryQuality"]["status"], "PASS")
+            self.assertEqual(report["adverseExcursion"]["status"], "PASS")
+            self.assertEqual(report["adverseExcursion"]["worstObservedAdverseR"], -0.42)
+            self.assertTrue((runtime / "strategy_contract" / RSI_SHADOW_OBSERVATION_REPORT_FILE).exists())
 
     def test_ea_shadow_evaluation_feeds_case_memory_and_ga_seed_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
