@@ -15,6 +15,7 @@ EA_SHADOW_EVALUATION_STATUS_FILE = "QuantGod_StrategyJsonEAShadowEvaluationStatu
 EA_SHADOW_EVALUATION_LEDGER_FILE = "QuantGod_StrategyJsonEAShadowEvaluationLedger.jsonl"
 FROZEN_RSI_LINEAGE_FILE = "QuantGod_RSIFrozenEliteLineage.json"
 RSI_SHADOW_OBSERVATION_REPORT_FILE = "QuantGod_RSIShadowContractObservationReport.json"
+RSI_OPPORTUNITY_LAYER_AUDIT_REPORT_FILE = "QuantGod_RSIOpportunityLayerAuditReport.json"
 
 CONTRACT_MODE = "SHADOW_EVALUATION_ONLY"
 ALLOWED_CONTRACT_MODES = {

@@ -30,6 +30,7 @@ from .schema import (
     EA_SHADOW_EVALUATION_LEDGER_FILE,
     EA_SHADOW_EVALUATION_STATUS_FILE,
     FROZEN_RSI_LINEAGE_FILE,
+    RSI_OPPORTUNITY_LAYER_AUDIT_REPORT_FILE,
     RSI_SHADOW_OBSERVATION_REPORT_FILE,
     SAFETY_BOUNDARY,
     contract_dir,
@@ -653,6 +654,76 @@ def build_rsi_shadow_contract_observation(runtime_dir: Path, *, write: bool = Tr
     return report
 
 
+def build_rsi_opportunity_layer_audit(runtime_dir: Path, *, write: bool = True) -> Dict[str, Any]:
+    runtime_dir = Path(runtime_dir)
+    lineage_file = _load_frozen_rsi_lineage(runtime_dir)
+    contract_status = _load_json(runtime_dir / CONTRACT_STATUS_FILE) or _load_json(
+        contract_dir(runtime_dir) / CONTRACT_STATUS_FILE
+    )
+    contract = contract_status.get("contract") if isinstance(contract_status.get("contract"), dict) else {}
+    if not contract:
+        contract = _load_json(runtime_dir / CONTRACT_JSON_FILE) or _load_json(contract_dir(runtime_dir) / CONTRACT_JSON_FILE)
+    frozen, lineage_source = _rsi_observation_lineage_snapshot(contract, lineage_file)
+    frozen_seed_id = str(frozen.get("selectedSeedId") or "")
+    frozen_fingerprint = str(frozen.get("selectedFingerprint") or "")
+    lineage_file_state = _lineage_file_state(lineage_file, frozen)
+    shadow_status = _read_shadow_evaluation_status(runtime_dir)
+    rows = _read_shadow_evaluation_ledger(runtime_dir, limit=2048)
+    if shadow_status:
+        rows.append(shadow_status)
+    matching = _dedupe_shadow_rows(
+        [row for row in rows if _row_matches_frozen_seed(row, frozen_seed_id, frozen_fingerprint)]
+    )
+    contract_rotated = bool(frozen_seed_id) and str(contract.get("selectedSeedId") or "") == frozen_seed_id
+    classification = _rsi_opportunity_layer_classification(matching)
+    latest = _latest_shadow_row(matching)
+    blockers: List[Dict[str, Any]] = []
+    if not frozen_seed_id:
+        blockers.append({"code": "NO_FROZEN_RSI_LINEAGE", "reasonZh": "缺少 P4-10I/P4-10J frozen RSI lineage 快照。"})
+    if not contract_rotated:
+        blockers.append({"code": "FROZEN_RSI_CONTRACT_NOT_ROTATED", "reasonZh": "EA contract 尚未轮换到 frozen RSI seed。"})
+    if not matching:
+        blockers.append({"code": "WAITING_FROZEN_RSI_SHADOW_LEDGER", "reasonZh": "等待 frozen RSI seed 的 EA shadow ledger 后再审计机会层。"})
+    if classification["safetyFlags"]["unsafeRowCount"]:
+        blockers.append({"code": "SHADOW_ONLY_SAFETY_BROKEN", "reasonZh": "ledger 出现非 shadow-only 安全旗标，需先停止晋级判断。"})
+    if classification["rsiAdverseGuard"]["missingLoadedCount"] and not classification["rsiAdverseGuard"]["loadedCount"]:
+        blockers.append({"code": "RSI_ADVERSE_GUARD_NOT_LOADED", "reasonZh": "当前样本未看到 rsiAdverseGuard.loaded=true，low-adverse 复核证据不完整。"})
+    status = _rsi_opportunity_layer_status(blockers, classification)
+    report = {
+        "ok": True,
+        "schema": "quantgod.rsi_opportunity_layer_audit.v1",
+        "generatedAt": utc_now_iso(),
+        "status": status,
+        "phase": "P4_10K_RSI_SHADOW_ONLY_OPPORTUNITY_LAYER_AUDIT",
+        "lineageSource": lineage_source,
+        "frozenSeedId": frozen_seed_id or None,
+        "frozenFingerprint": frozen_fingerprint or None,
+        "lineageFile": lineage_file_state,
+        "contractRotation": {
+            "selectedSeedId": contract.get("selectedSeedId"),
+            "selectionSource": contract.get("selectionSource"),
+            "forceFrozenRsi": bool(contract.get("forceFrozenRsi")),
+            "matchesFrozenSeed": contract_rotated,
+            "contractMode": contract.get("contractMode"),
+        },
+        "sampleWindow": {
+            "matchingRowCount": len(matching),
+            "sourceRowsInspected": len(rows),
+            "first": _shadow_row_summary(matching[0]) if matching else {},
+            "latest": _shadow_row_summary(latest),
+            "statusCounts": dict(_status_counts(matching)),
+            "blockerCounts": _field_counts(matching, "blocker"),
+        },
+        "classification": classification,
+        "blockers": blockers,
+        "recommendationsZh": _rsi_opportunity_layer_recommendations(status, classification, blockers),
+        "safety": dict(SAFETY_BOUNDARY),
+    }
+    if write:
+        _write_json(contract_dir(runtime_dir) / RSI_OPPORTUNITY_LAYER_AUDIT_REPORT_FILE, report)
+    return report
+
+
 def _rsi_observation_lineage_snapshot(contract: Dict[str, Any], lineage_file: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
     contract_lineage = (
         contract.get("frozenRsiLineage")
@@ -714,11 +785,37 @@ def _latest_shadow_row(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return sorted(rows, key=lambda item: str(item.get("generatedAtServer") or item.get("generatedAtLocal") or ""))[-1]
 
 
+def _dedupe_shadow_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for index, row in enumerate(rows):
+        key = str(row.get("evaluationId") or "")
+        if not key:
+            key = "|".join(
+                [
+                    str(row.get("generatedAtServer") or row.get("generatedAtLocal") or index),
+                    str(row.get("selectedSeedId") or ""),
+                    str(row.get("fingerprint") or ""),
+                    str(row.get("status") or ""),
+                    str(row.get("blocker") or ""),
+                ]
+            )
+        deduped[key] = row
+    return sorted(deduped.values(), key=lambda item: str(item.get("generatedAtServer") or item.get("generatedAtLocal") or ""))
+
+
 def _status_counts(rows: List[Dict[str, Any]]) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for row in rows:
         status = str(row.get("status") or "UNKNOWN")
         counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _field_counts(rows: List[Dict[str, Any]], field: str) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(field) or "UNKNOWN")
+        counts[value] = counts.get(value, 0) + 1
     return counts
 
 
@@ -745,6 +842,196 @@ def _shadow_row_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "rsiAdverseGuard": adverse_guard,
         "reasonZh": row.get("reasonZh"),
     }
+
+
+def _rsi_opportunity_layer_classification(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    research_observable_live_blocked: List[Dict[str, Any]] = []
+    research_observable_live_blocked_rsi: List[Dict[str, Any]] = []
+    true_no_rsi_opportunity: List[Dict[str, Any]] = []
+    not_research_observable_spread_blocked: List[Dict[str, Any]] = []
+    would_enter = [row for row in rows if bool(row.get("wouldEnter")) or row.get("status") == "SHADOW_WOULD_ENTER"]
+    adverse_values = [_adverse_value(row) for row in rows]
+    adverse_values = [value for value in adverse_values if value is not None]
+    indicator_ready_count = sum(1 for row in rows if bool(row.get("indicatorReady")))
+    hard_guards_pass_count = sum(1 for row in rows if bool(row.get("hardGuardsPass")))
+    rsi_signal_count = sum(1 for row in rows if bool(row.get("rsiLongSignal")))
+    live_spread_allowed_count = sum(1 for row in rows if bool(row.get("liveSpreadAllowed")))
+    shadow_research_spread_allowed_count = sum(1 for row in rows if bool(row.get("shadowResearchSpreadAllowed")))
+    spread_block_count = sum(1 for row in rows if str(row.get("blocker") or "") == "SPREAD_BLOCK")
+    guard_loaded_count = sum(1 for row in rows if _rsi_adverse_guard_loaded(row))
+    guard_range_pass_count = sum(1 for row in rows if _rsi_guard_range_pass(row))
+    unsafe_rows = [
+        row
+        for row in rows
+        if bool(row.get("orderSendAllowed"))
+        or bool(row.get("livePresetMutationAllowed"))
+        or bool(row.get("gaDirectLiveAllowed"))
+    ]
+    for row in rows:
+        live_spread_blocked = not bool(row.get("liveSpreadAllowed"))
+        research_spread_allowed = bool(row.get("shadowResearchSpreadAllowed"))
+        spread_blocked = str(row.get("blocker") or "") == "SPREAD_BLOCK"
+        research_observable = research_spread_allowed and live_spread_blocked
+        guard_ready = _rsi_guard_range_pass(row)
+        if spread_blocked and research_observable:
+            research_observable_live_blocked.append(row)
+            if bool(row.get("rsiLongSignal")) and guard_ready:
+                research_observable_live_blocked_rsi.append(row)
+            elif bool(row.get("indicatorReady")) and guard_ready and not bool(row.get("rsiLongSignal")):
+                true_no_rsi_opportunity.append(row)
+        elif spread_blocked and not research_observable:
+            not_research_observable_spread_blocked.append(row)
+        elif bool(row.get("indicatorReady")) and guard_ready and not bool(row.get("rsiLongSignal")):
+            true_no_rsi_opportunity.append(row)
+    latest_hidden = _latest_shadow_row(research_observable_live_blocked_rsi)
+    latest_true_no_rsi = _latest_shadow_row(true_no_rsi_opportunity)
+    return {
+        "rowCount": len(rows),
+        "wouldEnterCount": len(would_enter),
+        "rsiSignalCount": rsi_signal_count,
+        "indicatorReadyCount": indicator_ready_count,
+        "hardGuardsPassCount": hard_guards_pass_count,
+        "spreadBlockCount": spread_block_count,
+        "liveSpreadAllowedCount": live_spread_allowed_count,
+        "shadowResearchSpreadAllowedCount": shadow_research_spread_allowed_count,
+        "researchObservableLiveBlockedCount": len(research_observable_live_blocked),
+        "researchObservableLiveBlockedWithRsiSignalCount": len(research_observable_live_blocked_rsi),
+        "trueNoRsiOpportunityCount": len(true_no_rsi_opportunity),
+        "notResearchObservableSpreadBlockedCount": len(not_research_observable_spread_blocked),
+        "latestResearchObservableLiveBlockedWithRsiSignal": _shadow_row_summary(latest_hidden),
+        "latestTrueNoRsiOpportunity": _shadow_row_summary(latest_true_no_rsi),
+        "spreadDistribution": _numeric_distribution(rows, "spreadPips"),
+        "liveMaxSpreadDistribution": _numeric_distribution(rows, "liveMaxSpreadPips"),
+        "shadowResearchMaxSpreadDistribution": _numeric_distribution(rows, "shadowResearchMaxSpreadPips"),
+        "rsiClosed1Distribution": _numeric_distribution(rows, "rsiClosed1"),
+        "rsiBuyBandDistribution": _numeric_distribution(rows, "rsiBuyBand"),
+        "rsiAdverseGuard": {
+            "loadedCount": guard_loaded_count,
+            "rangePassCount": guard_range_pass_count,
+            "missingLoadedCount": max(0, len(rows) - guard_loaded_count),
+            "entryRangePipsDistribution": _nested_numeric_distribution(rows, ("rsiAdverseGuard", "entryRangePips")),
+            "maxEntryRangePipsDistribution": _nested_numeric_distribution(rows, ("rsiAdverseGuard", "maxEntryRangePips")),
+        },
+        "adverseSamples": {
+            "count": len(adverse_values),
+            "worstObservedAdverseR": min(adverse_values) if adverse_values else None,
+            "bestObservedAdverseR": max(adverse_values) if adverse_values else None,
+        },
+        "safetyFlags": {
+            "unsafeRowCount": len(unsafe_rows),
+            "orderSendAllowedCount": sum(1 for row in rows if bool(row.get("orderSendAllowed"))),
+            "livePresetMutationAllowedCount": sum(1 for row in rows if bool(row.get("livePresetMutationAllowed"))),
+            "gaDirectLiveAllowedCount": sum(1 for row in rows if bool(row.get("gaDirectLiveAllowed"))),
+        },
+        "decision": _rsi_opportunity_layer_decision(
+            len(rows),
+            len(research_observable_live_blocked),
+            len(research_observable_live_blocked_rsi),
+            len(true_no_rsi_opportunity),
+            len(not_research_observable_spread_blocked),
+        ),
+    }
+
+
+def _rsi_guard_range_pass(row: Dict[str, Any]) -> bool:
+    guard = row.get("rsiAdverseGuard") if isinstance(row.get("rsiAdverseGuard"), dict) else {}
+    if "rangePass" in guard:
+        return bool(guard.get("rangePass"))
+    return True
+
+
+def _numeric_distribution(rows: List[Dict[str, Any]], key: str) -> Dict[str, Any]:
+    values = [_safe_float(row.get(key), None) for row in rows]
+    values = [value for value in values if value is not None]
+    return _distribution(values)
+
+
+def _nested_numeric_distribution(rows: List[Dict[str, Any]], path: Tuple[str, ...]) -> Dict[str, Any]:
+    values: List[float] = []
+    for row in rows:
+        current: Any = row
+        for key in path:
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(key)
+        value = _safe_float(current, None)
+        if value is not None:
+            values.append(value)
+    return _distribution(values)
+
+
+def _distribution(values: List[float]) -> Dict[str, Any]:
+    if not values:
+        return {"count": 0, "min": None, "median": None, "max": None}
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        median = ordered[midpoint]
+    else:
+        median = (ordered[midpoint - 1] + ordered[midpoint]) / 2
+    return {"count": len(ordered), "min": ordered[0], "median": median, "max": ordered[-1]}
+
+
+def _rsi_opportunity_layer_decision(
+    row_count: int,
+    research_observable_live_blocked_count: int,
+    hidden_rsi_count: int,
+    true_no_rsi_count: int,
+    not_research_observable_spread_blocked_count: int,
+) -> Dict[str, Any]:
+    if row_count <= 0:
+        return {
+            "label": "WAITING_LEDGER",
+            "reasonZh": "还没有 frozen RSI seed 的 shadow ledger，暂时不能区分 spread 阻断与无机会。",
+        }
+    if hidden_rsi_count > 0:
+        return {
+            "label": "RESEARCH_SPREAD_PASS_LIVE_SPREAD_BLOCKED_RSI_SIGNAL",
+            "reasonZh": "已出现 RSI 入场信号：研究点差口径可观察，但 live 点差口径阻断；这不是“没有机会”。",
+        }
+    if research_observable_live_blocked_count > 0 and true_no_rsi_count >= research_observable_live_blocked_count:
+        return {
+            "label": "TRUE_NO_RSI_OPPORTUNITY_UNDER_RESEARCH_SPREAD",
+            "reasonZh": "研究点差口径可观察的样本里 RSI 未触发，当前更像是真的没有 RSI 入场机会。",
+        }
+    if not_research_observable_spread_blocked_count > 0 and research_observable_live_blocked_count <= 0:
+        return {
+            "label": "SPREAD_TOO_WIDE_FOR_RESEARCH_LAYER",
+            "reasonZh": "点差连 research shadow 口径都未通过，不能把这些样本解释成可观察机会。",
+        }
+    return {
+        "label": "MIXED_OR_INCOMPLETE_OPPORTUNITY_LAYER",
+        "reasonZh": "样本同时包含不同阻断路径或字段不完整，需要继续观察更多 shadow ledger。",
+    }
+
+
+def _rsi_opportunity_layer_status(blockers: List[Dict[str, Any]], classification: Dict[str, Any]) -> str:
+    hard_blockers = {"NO_FROZEN_RSI_LINEAGE", "FROZEN_RSI_CONTRACT_NOT_ROTATED", "SHADOW_ONLY_SAFETY_BROKEN"}
+    if any(blocker.get("code") in hard_blockers for blocker in blockers):
+        return "WARN"
+    if classification.get("researchObservableLiveBlockedWithRsiSignalCount", 0) > 0:
+        return "PASS"
+    return "WATCH"
+
+
+def _rsi_opportunity_layer_recommendations(
+    status: str, classification: Dict[str, Any], blockers: List[Dict[str, Any]]
+) -> List[str]:
+    if status == "WARN" and blockers:
+        return [str(blocker.get("reasonZh") or blocker.get("code")) for blocker in blockers]
+    decision = classification.get("decision") if isinstance(classification.get("decision"), dict) else {}
+    label = str(decision.get("label") or "")
+    if label == "RESEARCH_SPREAD_PASS_LIVE_SPREAD_BLOCKED_RSI_SIGNAL":
+        return [
+            "保留 frozen seed，不扩搜索；下一步复核 live spread gate 是否应记录 opportunity-layer shadow 样本，而不是立刻放宽实盘点差。",
+            "继续等待 post-entry adverse/MAE/maxAdverseR，确认 low-adverse guard 在 MT5 shadow 里复现。",
+        ]
+    if label == "TRUE_NO_RSI_OPPORTUNITY_UNDER_RESEARCH_SPREAD":
+        return ["继续观察同一颗 seed；当前证据指向 RSI 未触发，而不是 live spread 掩盖了入场机会。"]
+    if label == "SPREAD_TOO_WIDE_FOR_RESEARCH_LAYER":
+        return ["继续等正常流动性窗口；这些样本连 research spread 口径都不可观察，不应用来否定 RSI seed。"]
+    return ["继续收集 frozen RSI shadow ledger，直到能分清 research-spread-pass/live-blocked 与 no-signal。"]
 
 
 def _entry_quality_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:

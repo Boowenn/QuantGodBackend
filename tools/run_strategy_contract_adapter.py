@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from strategy_contract_adapter.builder import (
+    build_rsi_opportunity_layer_audit,
     build_rsi_shadow_contract_observation,
     build_strategy_contract,
     read_strategy_contract_status,
@@ -59,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
     frozen.add_argument("--observe", action="store_true")
     observe = sub.add_parser("rsi-shadow-observation")
     observe.add_argument("--write", action="store_true")
+    opportunity_audit = sub.add_parser("rsi-opportunity-layer-audit")
+    opportunity_audit.add_argument("--write", action="store_true")
     text = sub.add_parser("telegram-text")
     text.add_argument("--refresh", action="store_true")
     text.add_argument("--send", action="store_true")
@@ -97,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
         return emit(payload)
     if args.command == "rsi-shadow-observation":
         return emit(build_rsi_shadow_contract_observation(runtime_dir, write=args.write))
+    if args.command == "rsi-opportunity-layer-audit":
+        return emit(build_rsi_opportunity_layer_audit(runtime_dir, write=args.write))
     if args.command == "telegram-text":
         payload = (
             build_strategy_contract(

@@ -53,6 +53,8 @@ test('Strategy JSON contract backend writes only shadow/tester/paper adapter fil
     'P4_10J_FROZEN_RSI_SEED',
     'FROZEN_RSI_LINEAGE_FILE',
     'RSI_SHADOW_OBSERVATION_REPORT_FILE',
+    'RSI_OPPORTUNITY_LAYER_AUDIT_REPORT_FILE',
+    'rsi-opportunity-layer-audit',
     'force_frozen_rsi',
     'rsiAdverseGuardMode',
   ]) {

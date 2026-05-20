@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from tools.strategy_contract_adapter.builder import (
+    build_rsi_opportunity_layer_audit,
     build_rsi_shadow_contract_observation,
     build_strategy_contract,
     read_strategy_contract_status,
@@ -17,6 +18,7 @@ from tools.strategy_contract_adapter.schema import (
     EA_SHADOW_EVALUATION_LEDGER_FILE,
     EA_SHADOW_EVALUATION_STATUS_FILE,
     FROZEN_RSI_LINEAGE_FILE,
+    RSI_OPPORTUNITY_LAYER_AUDIT_REPORT_FILE,
     RSI_SHADOW_OBSERVATION_REPORT_FILE,
 )
 from tools.strategy_ga.fitness import score_seed
@@ -396,6 +398,88 @@ class StrategyContractAdapterTests(unittest.TestCase):
                 "FROZEN_RSI_CONTRACT_NOT_ROTATED",
                 {blocker.get("code") for blocker in report["blockers"]},
             )
+
+    def test_rsi_opportunity_layer_audit_separates_live_spread_block_from_no_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            self._write_frozen_rsi_lineage(runtime, seed_id="GA-USDJPY-G0077-C0002")
+            build_strategy_contract(runtime, write=True, force_frozen_rsi=True)
+            rows = [
+                {
+                    "schema": "quantgod.strategy_json_ea_shadow_evaluation.v1",
+                    "evaluationId": "eval-g0077-research-observable-no-rsi",
+                    "generatedAtLocal": "2026-05-20T00:00:00Z",
+                    "status": "SHADOW_GUARD_BLOCKED",
+                    "blocker": "SPREAD_BLOCK",
+                    "selectedSeedId": "GA-USDJPY-G0077-C0002",
+                    "fingerprint": "fp-frozen-rsi",
+                    "strategyFamily": "RSI_Reversal",
+                    "direction": "LONG",
+                    "wouldEnter": False,
+                    "hardGuardsPass": False,
+                    "indicatorReady": True,
+                    "rsiLongSignal": False,
+                    "spreadPips": 2.6,
+                    "liveSpreadAllowed": False,
+                    "shadowResearchSpreadAllowed": True,
+                    "rsiClosed1": 41.2,
+                    "rsiBuyBand": 34.0,
+                    "rsiAdverseGuard": {
+                        "loaded": True,
+                        "mode": "P4_10G_RSI_ADVERSE_EXCURSION",
+                        "entryRangePips": 36.0,
+                        "rangePass": True,
+                    },
+                },
+                {
+                    "schema": "quantgod.strategy_json_ea_shadow_evaluation.v1",
+                    "evaluationId": "eval-g0077-research-observable-rsi-live-blocked",
+                    "generatedAtLocal": "2026-05-20T00:05:00Z",
+                    "status": "SHADOW_GUARD_BLOCKED",
+                    "blocker": "SPREAD_BLOCK",
+                    "selectedSeedId": "GA-USDJPY-G0077-C0002",
+                    "fingerprint": "fp-frozen-rsi",
+                    "strategyFamily": "RSI_Reversal",
+                    "direction": "LONG",
+                    "wouldEnter": False,
+                    "hardGuardsPass": False,
+                    "indicatorReady": True,
+                    "rsiLongSignal": True,
+                    "spreadPips": 2.4,
+                    "liveSpreadAllowed": False,
+                    "shadowResearchSpreadAllowed": True,
+                    "rsiClosed1": 32.1,
+                    "rsiBuyBand": 34.0,
+                    "rsiAdverseGuard": {
+                        "loaded": True,
+                        "mode": "P4_10G_RSI_ADVERSE_EXCURSION",
+                        "entryRangePips": 34.0,
+                        "rangePass": True,
+                    },
+                },
+            ]
+            (runtime / EA_SHADOW_EVALUATION_LEDGER_FILE).write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+                encoding="utf-8",
+            )
+            (runtime / EA_SHADOW_EVALUATION_STATUS_FILE).write_text(
+                json.dumps(rows[-1], ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            report = build_rsi_opportunity_layer_audit(runtime, write=True)
+
+            classification = report["classification"]
+            self.assertEqual(report["status"], "PASS")
+            self.assertEqual(report["phase"], "P4_10K_RSI_SHADOW_ONLY_OPPORTUNITY_LAYER_AUDIT")
+            self.assertEqual(classification["researchObservableLiveBlockedCount"], 2)
+            self.assertEqual(classification["researchObservableLiveBlockedWithRsiSignalCount"], 1)
+            self.assertEqual(classification["trueNoRsiOpportunityCount"], 1)
+            self.assertEqual(
+                classification["decision"]["label"],
+                "RESEARCH_SPREAD_PASS_LIVE_SPREAD_BLOCKED_RSI_SIGNAL",
+            )
+            self.assertTrue((runtime / "strategy_contract" / RSI_OPPORTUNITY_LAYER_AUDIT_REPORT_FILE).exists())
 
     def test_ea_shadow_evaluation_feeds_case_memory_and_ga_seed_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
