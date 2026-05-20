@@ -348,6 +348,55 @@ class StrategyContractAdapterTests(unittest.TestCase):
             self.assertEqual(report["adverseExcursion"]["worstObservedAdverseR"], -0.42)
             self.assertTrue((runtime / "strategy_contract" / RSI_SHADOW_OBSERVATION_REPORT_FILE).exists())
 
+    def test_rsi_shadow_observation_uses_contract_snapshot_when_lineage_file_rolls_forward(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp)
+            self._write_frozen_rsi_lineage(runtime, seed_id="GA-USDJPY-G0077-C0002")
+            build_strategy_contract(runtime, write=True, force_frozen_rsi=True)
+            self._write_frozen_rsi_lineage(runtime, seed_id="GA-USDJPY-G0107-C0002")
+            frozen_path = ga_dir(runtime) / FROZEN_RSI_LINEAGE_FILE
+            drifted = json.loads(frozen_path.read_text(encoding="utf-8"))
+            drifted["selectedFingerprint"] = "fp-next-rsi"
+            frozen_path.write_text(json.dumps(drifted, ensure_ascii=False), encoding="utf-8")
+            row = {
+                "schema": "quantgod.strategy_json_ea_shadow_evaluation.v1",
+                "evaluationId": "eval-g0077-after-lineage-roll",
+                "status": "SHADOW_GUARD_BLOCKED",
+                "blocker": "SPREAD_BLOCK",
+                "selectedSeedId": "GA-USDJPY-G0077-C0002",
+                "fingerprint": "fp-frozen-rsi",
+                "strategyFamily": "RSI_Reversal",
+                "direction": "LONG",
+                "wouldEnter": False,
+                "hardGuardsPass": False,
+                "indicatorReady": True,
+                "rsiLongSignal": False,
+                "rsiAdverseGuard": {
+                    "loaded": True,
+                    "mode": "P4_10G_RSI_ADVERSE_EXCURSION",
+                    "rangePass": True,
+                },
+            }
+            (runtime / EA_SHADOW_EVALUATION_LEDGER_FILE).write_text(
+                json.dumps(row, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            report = build_rsi_shadow_contract_observation(runtime, write=True)
+
+            self.assertEqual(report["status"], "WATCH")
+            self.assertEqual(report["lineageSource"], "EA_CONTRACT_FROZEN_RSI_SNAPSHOT")
+            self.assertEqual(report["frozenSeedId"], "GA-USDJPY-G0077-C0002")
+            self.assertTrue(report["lineageFile"]["driftedFromActiveContract"])
+            self.assertEqual(report["lineageFile"]["selectedSeedId"], "GA-USDJPY-G0107-C0002")
+            self.assertTrue(report["contractRotation"]["matchesFrozenSeed"])
+            self.assertGreaterEqual(report["shadowEvaluation"]["matchingRowCount"], 1)
+            self.assertEqual(report["shadowEvaluation"]["latest"]["selectedSeedId"], "GA-USDJPY-G0077-C0002")
+            self.assertNotIn(
+                "FROZEN_RSI_CONTRACT_NOT_ROTATED",
+                {blocker.get("code") for blocker in report["blockers"]},
+            )
+
     def test_ea_shadow_evaluation_feeds_case_memory_and_ga_seed_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = Path(tmp)

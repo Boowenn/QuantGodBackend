@@ -158,6 +158,7 @@ def _frozen_lineage_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "sourceFile": FROZEN_RSI_LINEAGE_FILE,
         "frozenAt": payload.get("frozenAt"),
+        "selectedSeedId": payload.get("selectedSeedId"),
         "selectedGeneration": payload.get("selectedGeneration"),
         "selectedProfile": payload.get("selectedProfile"),
         "selectedFingerprint": payload.get("selectedFingerprint"),
@@ -575,15 +576,17 @@ def build_strategy_contract(
 
 def build_rsi_shadow_contract_observation(runtime_dir: Path, *, write: bool = True) -> Dict[str, Any]:
     runtime_dir = Path(runtime_dir)
-    frozen = _load_frozen_rsi_lineage(runtime_dir)
-    frozen_seed_id = str(frozen.get("selectedSeedId") or "")
-    frozen_fingerprint = str(frozen.get("selectedFingerprint") or "")
+    lineage_file = _load_frozen_rsi_lineage(runtime_dir)
     contract_status = _load_json(runtime_dir / CONTRACT_STATUS_FILE) or _load_json(
         contract_dir(runtime_dir) / CONTRACT_STATUS_FILE
     )
     contract = contract_status.get("contract") if isinstance(contract_status.get("contract"), dict) else {}
     if not contract:
         contract = _load_json(runtime_dir / CONTRACT_JSON_FILE) or _load_json(contract_dir(runtime_dir) / CONTRACT_JSON_FILE)
+    frozen, lineage_source = _rsi_observation_lineage_snapshot(contract, lineage_file)
+    frozen_seed_id = str(frozen.get("selectedSeedId") or "")
+    frozen_fingerprint = str(frozen.get("selectedFingerprint") or "")
+    lineage_file_state = _lineage_file_state(lineage_file, frozen)
     shadow_status = _read_shadow_evaluation_status(runtime_dir)
     rows = _read_shadow_evaluation_ledger(runtime_dir, limit=512)
     if shadow_status:
@@ -622,8 +625,10 @@ def build_rsi_shadow_contract_observation(runtime_dir: Path, *, write: bool = Tr
         "generatedAt": utc_now_iso(),
         "status": status,
         "phase": "P4_10J_RSI_SHADOW_CONTRACT_OBSERVATION",
+        "lineageSource": lineage_source,
         "frozenSeedId": frozen_seed_id or None,
         "frozenFingerprint": frozen_fingerprint or None,
+        "lineageFile": lineage_file_state,
         "contractRotation": {
             "selectedSeedId": contract.get("selectedSeedId"),
             "selectionSource": contract.get("selectionSource"),
@@ -646,6 +651,53 @@ def build_rsi_shadow_contract_observation(runtime_dir: Path, *, write: bool = Tr
     if write:
         _write_json(contract_dir(runtime_dir) / RSI_SHADOW_OBSERVATION_REPORT_FILE, report)
     return report
+
+
+def _rsi_observation_lineage_snapshot(contract: Dict[str, Any], lineage_file: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    contract_lineage = (
+        contract.get("frozenRsiLineage")
+        if isinstance(contract.get("frozenRsiLineage"), dict)
+        else {}
+    )
+    contract_seed_id = str(contract.get("selectedSeedId") or "")
+    contract_fingerprint = str(contract.get("fingerprint") or contract_lineage.get("selectedFingerprint") or "")
+    is_p4_10j_contract = (
+        bool(contract.get("forceFrozenRsi"))
+        and str(contract.get("selectionSource") or "") == "P4_10J_FROZEN_RSI_SEED"
+        and bool(contract_seed_id)
+    )
+    if is_p4_10j_contract:
+        snapshot = {
+            "sourceFile": contract_lineage.get("sourceFile") or FROZEN_RSI_LINEAGE_FILE,
+            "frozenAt": contract_lineage.get("frozenAt") or contract.get("generatedAt"),
+            "selectedSeedId": contract_seed_id,
+            "selectedGeneration": contract_lineage.get("selectedGeneration"),
+            "selectedProfile": contract_lineage.get("selectedProfile"),
+            "selectedFingerprint": contract_fingerprint,
+            "lineageDepth": contract_lineage.get("lineageDepth"),
+            "criteria": contract_lineage.get("criteria") if isinstance(contract_lineage.get("criteria"), dict) else {},
+            "productionEvidenceAllPass": contract_lineage.get("productionEvidenceAllPass"),
+            "replayAllPass": contract_lineage.get("replayAllPass"),
+        }
+        return snapshot, "EA_CONTRACT_FROZEN_RSI_SNAPSHOT"
+    return lineage_file, "GA_FROZEN_RSI_LINEAGE_FILE"
+
+
+def _lineage_file_state(lineage_file: Dict[str, Any], active_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    file_seed_id = str(lineage_file.get("selectedSeedId") or "")
+    file_fingerprint = str(lineage_file.get("selectedFingerprint") or "")
+    active_seed_id = str(active_snapshot.get("selectedSeedId") or "")
+    active_fingerprint = str(active_snapshot.get("selectedFingerprint") or "")
+    drifted = bool(file_seed_id and active_seed_id and file_seed_id != active_seed_id) or bool(
+        file_fingerprint and active_fingerprint and file_fingerprint != active_fingerprint
+    )
+    return {
+        "sourceFile": FROZEN_RSI_LINEAGE_FILE,
+        "selectedSeedId": file_seed_id or None,
+        "selectedFingerprint": file_fingerprint or None,
+        "selectedGeneration": lineage_file.get("selectedGeneration"),
+        "driftedFromActiveContract": drifted,
+    }
 
 
 def _row_matches_frozen_seed(row: Dict[str, Any], seed_id: str, fingerprint: str) -> bool:
